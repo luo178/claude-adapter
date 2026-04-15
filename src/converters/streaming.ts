@@ -95,12 +95,6 @@ export async function streamOpenAIToAnthropic(
 
   try {
     for await (const chunk of openaiStream) {
-      logger.debug('=== OpenAI Stream Chunk ===', {
-        hasContent: !!chunk.choices[0]?.delta?.content,
-        content: chunk.choices[0]?.delta?.content?.substring(0, 200),
-        finishReason: chunk.choices[0]?.finish_reason,
-        usage: chunk.usage,
-      });
       processChunk(chunk, state, raw);
     }
 

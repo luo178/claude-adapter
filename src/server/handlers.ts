@@ -114,7 +114,7 @@ export function createMessagesHandler(config: AdapterConfig) {
         log.info(`Using XML tool calling mode (${anthropicRequest.tools.length} tools)`);
       }
 
-      if (isStreaming) {
+      if (isStreaming || (toolStyle === 'xml' && anthropicRequest.tools?.length)) {
         log.debug('=== OpenAI API Call ===', {
           url: `${config.baseUrl}/chat/completions`,
           model: openaiRequest.model,

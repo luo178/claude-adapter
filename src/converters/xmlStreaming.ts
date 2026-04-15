@@ -64,16 +64,35 @@ export async function streamXmlOpenAIToAnthropic(
 
   try {
     logger.debug('Starting XML stream processing');
+    let chunkCount = 0;
+    let lastLogTime = Date.now();
     for await (const chunk of openaiStream) {
-      logger.debug('Received chunk', {
-        hasContent: !!chunk.choices[0]?.delta?.content,
-        contentLength: chunk.choices[0]?.delta?.content?.length || 0,
-        finishReason: chunk.choices[0]?.finish_reason,
-      });
+      chunkCount++;
+      const now = Date.now();
+      if (now - lastLogTime > 5000) {
+        logger.debug('Still receiving chunks', {
+          count: chunkCount,
+          sinceStart: now - lastLogTime,
+        });
+        lastLogTime = now;
+      }
+
+      const choice = chunk.choices[0];
+      if (choice?.delta) {
+        const deltaAny = choice.delta as any;
+        const text = choice.delta?.content || deltaAny?.text || '';
+        if (text) {
+          logger.debug('=== OpenAI Stream Chunk ===', {
+            chunkIndex: chunkCount,
+            textPreview: text.substring(0, 200),
+            hasToolCode: text.includes('<tool_code'),
+          });
+        }
+      }
+
       processChunk(chunk, state, raw);
     }
-
-    logger.debug('Stream iteration complete, flushing remaining');
+    logger.debug('Stream iteration complete', { totalChunks: chunkCount });
     // Final flush - emit any remaining text
     flushRemainingContent(state, raw);
     finishStream(state, raw);
@@ -90,9 +109,15 @@ export async function streamXmlOpenAIToAnthropic(
 function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any): void {
   // Update usage if present
   if (chunk.usage) {
-    state.inputTokens = chunk.usage.prompt_tokens;
-    state.outputTokens = chunk.usage.completion_tokens;
-    state.cachedInputTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+    if (chunk.usage.prompt_tokens !== undefined) {
+      state.inputTokens = chunk.usage.prompt_tokens;
+    }
+    if (chunk.usage.completion_tokens !== undefined) {
+      state.outputTokens = chunk.usage.completion_tokens;
+    }
+    if (chunk.usage.prompt_tokens_details?.cached_tokens !== undefined) {
+      state.cachedInputTokens = chunk.usage.prompt_tokens_details.cached_tokens;
+    }
   }
 
   // Capture response model
@@ -116,24 +141,20 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
       argsPreview: tc.function?.arguments?.substring(0, 100),
     })),
   });
-
   // Send message_start on first chunk
   if (!state.hasStarted) {
     logger.debug('Sending message_start');
     sendMessageStart(state, raw);
     state.hasStarted = true;
   }
+  const deltaAny = choice.delta as any;
+  const textDelta = choice.delta?.content || deltaAny?.text || '';
 
-  const textDelta = choice.delta?.content || '';
-  if (!textDelta) return;
+  if (!textDelta) {
+    return;
+  }
 
-  // Add to buffer
   state.buffer += textDelta;
-  logger.debug('Buffer updated', {
-    bufferLength: state.buffer.length,
-    bufferPreview: state.buffer.substring(0, 500),
-  });
-
   // Process buffer for complete tool calls
   processBuffer(state, raw);
 }
@@ -141,7 +162,15 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
 function processBuffer(state: BufferedState, raw: any): void {
   const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
+  const hasToolCode = cleanBuffer.includes('<tool_code');
   const toolMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
+
+  if (hasToolCode && !toolMatch) {
+    logger.debug('Buffer has tool_code but no match', {
+      bufferLength: cleanBuffer.length,
+      preview: cleanBuffer.substring(0, 500),
+    });
+  }
 
   // Keep processing until no more complete tool calls are found
   let iteration = 0;
