@@ -77,12 +77,12 @@ export function convertResponseToAnthropic(
 
   // Build usage - include all cache-related tokens
   const usage: AnthropicUsage = {
-    input_tokens: openaiResponse.usage.prompt_tokens,
-    output_tokens: openaiResponse.usage.completion_tokens,
+    input_tokens: openaiResponse.usage?.prompt_tokens ?? 0,
+    output_tokens: openaiResponse.usage?.completion_tokens ?? 0,
   };
 
   // Map cache read tokens (from prompt caching)
-  if (openaiResponse.usage.prompt_tokens_details?.cached_tokens) {
+  if (openaiResponse.usage?.prompt_tokens_details?.cached_tokens) {
     usage.cache_read_input_tokens = openaiResponse.usage.prompt_tokens_details.cached_tokens;
   }
 
