@@ -34,7 +34,8 @@ export interface AnthropicSystemContent {
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
-  | AnthropicToolResultBlock;
+  | AnthropicToolResultBlock
+  | AnthropicThinkingBlock;
 
 export interface AnthropicTextBlock {
   type: 'text';
@@ -71,6 +72,22 @@ export interface AnthropicToolChoice {
   name?: string; // Only when type is 'tool'
 }
 
+export interface AnthropicThinking {
+  type: 'enabled' | 'disabled';
+  budget_tokens: number;
+}
+
+export interface AnthropicThinkingBlock {
+  type: 'thinking';
+  thinking: string;
+  signature?: string;
+}
+
+export interface AnthropicReasoningEffort {
+  effort: 'low' | 'medium' | 'high';
+  summary?: 'auto' | 'detailed';
+}
+
 // Message response
 export interface AnthropicMessageResponse {
   id: string;
@@ -81,6 +98,7 @@ export interface AnthropicMessageResponse {
   stop_reason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null;
   stop_sequence: string | null;
   usage: AnthropicUsage;
+  thinking?: AnthropicThinkingBlock;
 }
 
 export interface AnthropicUsage {
