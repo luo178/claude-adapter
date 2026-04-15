@@ -78,17 +78,37 @@ export async function streamXmlOpenAIToAnthropic(
       }
 
       const choice = chunk.choices[0];
-      if (choice?.delta) {
-        const deltaAny = choice.delta as any;
-        const text = choice.delta?.content || deltaAny?.text || '';
-        if (text) {
-          logger.debug('=== OpenAI Stream Chunk ===', {
-            chunkIndex: chunkCount,
-            textPreview: text.substring(0, 200),
-            hasToolCode: text.includes('<tool_code'),
-          });
+
+      if (chunk.usage) {
+        if (chunk.usage.prompt_tokens !== undefined) state.inputTokens = chunk.usage.prompt_tokens;
+        if (chunk.usage.completion_tokens !== undefined)
+          state.outputTokens = chunk.usage.completion_tokens;
+        if (chunk.usage.prompt_tokens_details?.cached_tokens !== undefined) {
+          state.cachedInputTokens = chunk.usage.prompt_tokens_details.cached_tokens;
         }
       }
+
+      if (!choice) {
+        logger.debug('No choice in chunk (stream ending)', { chunkIndex: chunkCount });
+        flushRemainingContent(state, raw);
+        finishStream(state, raw);
+        return;
+      }
+
+      const text = choice.delta?.content || (choice.delta as any)?.text || '';
+
+      logger.debug('=== Xml OpenAI Stream Chunk ===', {
+        chunkIndex: chunkCount,
+        hasContent: !!choice.delta?.content,
+        content: text.substring(0, 300),
+        finishReason: choice.finish_reason,
+        hasToolCode: text.includes('<tool_code'),
+        toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
+          id: tc.id,
+          name: tc.function?.name,
+          argsPreview: tc.function?.arguments?.substring(0, 100),
+        })),
+      });
 
       processChunk(chunk, state, raw);
     }
@@ -131,25 +151,14 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
     return;
   }
 
-  logger.debug('=== Xml OpenAI Stream Chunk ===', {
-    hasContent: !!choice.delta?.content,
-    content: choice.delta?.content?.substring(0, 300),
-    finishReason: choice.finish_reason,
-    toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
-      id: tc.id,
-      name: tc.function?.name,
-      argsPreview: tc.function?.arguments?.substring(0, 100),
-    })),
-  });
   // Send message_start on first chunk
   if (!state.hasStarted) {
     logger.debug('Sending message_start');
     sendMessageStart(state, raw);
     state.hasStarted = true;
   }
-  const deltaAny = choice.delta as any;
-  const textDelta = choice.delta?.content || deltaAny?.text || '';
 
+  const textDelta = choice.delta?.content || (choice.delta as any)?.text || '';
   if (!textDelta) {
     return;
   }
@@ -163,20 +172,21 @@ function processBuffer(state: BufferedState, raw: any): void {
   const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
   const hasToolCode = cleanBuffer.includes('<tool_code');
-  const toolMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
 
-  if (hasToolCode && !toolMatch) {
-    logger.debug('Buffer has tool_code but no match', {
-      bufferLength: cleanBuffer.length,
-      preview: cleanBuffer.substring(0, 500),
-    });
+  if (hasToolCode) {
+    const selfClosingMatch = cleanBuffer.match(TOOL_CODE_SELF_CLOSING);
+    const normalMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
+    if (!selfClosingMatch && !normalMatch) {
+      logger.debug('Buffer has tool_code but no match', {
+        bufferLength: cleanBuffer.length,
+        preview: cleanBuffer.substring(0, 500),
+      });
+    }
   }
 
-  // Keep processing until no more complete tool calls are found
   let iteration = 0;
   while (true) {
     iteration++;
-    // Safety limit to prevent infinite loops
     if (iteration > 100) {
       logger.warn('XML parsing iteration limit reached', {
         bufferLength: state.buffer.length,
@@ -185,18 +195,30 @@ function processBuffer(state: BufferedState, raw: any): void {
       break;
     }
 
-    // Remove <think> blocks from consideration
     const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
-    // Check for complete tool call
-    const toolMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
+    const selfClosingMatch = cleanBuffer.match(TOOL_CODE_SELF_CLOSING);
+    const normalMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
 
-    if (!toolMatch) {
-      // No complete tool call found, exit loop
-      break;
+    let toolMatch: RegExpMatchArray | null = null;
+    let isSelfClosing = false;
+
+    if (selfClosingMatch && normalMatch) {
+      if (cleanBuffer.indexOf(selfClosingMatch[0]) < cleanBuffer.indexOf(normalMatch[0])) {
+        toolMatch = selfClosingMatch;
+        isSelfClosing = true;
+      } else {
+        toolMatch = normalMatch;
+      }
+    } else if (selfClosingMatch) {
+      toolMatch = selfClosingMatch;
+      isSelfClosing = true;
+    } else if (normalMatch) {
+      toolMatch = normalMatch;
     }
 
-    // toolName may include quotes from the regex group, strip them
+    if (!toolMatch) break;
+
     let toolName = toolMatch[1];
     if (toolName.startsWith('"') && toolName.endsWith('"')) {
       toolName = toolName.slice(1, -1);
@@ -204,31 +226,57 @@ function processBuffer(state: BufferedState, raw: any): void {
       toolName = toolName.slice(1, -1);
     }
 
-    const rawArgs = toolMatch[2];
-    const fullMatch = toolMatch[0];
-    const matchStart = cleanBuffer.indexOf(fullMatch);
+    let rawArgs = '';
+    let fullMatch = '';
 
-    // Get text BEFORE the tool call
+    if (isSelfClosing) {
+      rawArgs = extractAttributes(toolMatch[0], toolName);
+      fullMatch = toolMatch[0];
+    } else {
+      rawArgs = toolMatch[2];
+      fullMatch = toolMatch[0];
+    }
+
+    const matchStart = cleanBuffer.indexOf(fullMatch);
     const textBeforeTool = cleanBuffer.substring(0, matchStart);
     const cleanText = textBeforeTool.trim();
 
-    // Emit text block if there's content
     if (cleanText.length > 0) {
       emitTextBlock(cleanText, state, raw);
     }
 
-    // Clean and emit tool use block
     const cleanArgs = cleanToolArgs(rawArgs);
     emitToolUseBlock(toolName, cleanArgs, state, raw);
 
-    // Update buffer: remove everything up to and including the tool call
-    // Handle variations in closing tags (with or without leading whitespace)
-    const endTagMatch = state.buffer.match(/\s*<\/tool_code\s*>/i);
+    const endTagMatch = isSelfClosing ? null : state.buffer.match(/\s*<\/tool_code\s*>/i);
     if (endTagMatch) {
       const originalMatchEnd = state.buffer.indexOf(endTagMatch[0]) + endTagMatch[0].length;
       state.buffer = state.buffer.substring(originalMatchEnd);
+    } else if (isSelfClosing) {
+      const matchEnd = state.buffer.indexOf(fullMatch) + fullMatch.length;
+      state.buffer = state.buffer.substring(matchEnd);
     }
   }
+}
+
+function extractAttributes(tagString: string, toolName: string): string {
+  const attrs: Record<string, string> = {};
+  const attrRegex = /(\w+)\s*=\s*("[^"]*"|'[^']*'|[^\s/>]+)/g;
+  let match;
+  while ((match = attrRegex.exec(tagString)) !== null) {
+    const key = match[1];
+    const value = match[2];
+    if (key !== 'name') {
+      let cleanValue = value;
+      if (cleanValue.startsWith('"') && cleanValue.endsWith('"')) {
+        cleanValue = cleanValue.slice(1, -1);
+      } else if (cleanValue.startsWith("'") && cleanValue.endsWith("'")) {
+        cleanValue = cleanValue.slice(1, -1);
+      }
+      attrs[key] = cleanValue;
+    }
+  }
+  return JSON.stringify(attrs);
 }
 
 function flushRemainingContent(state: BufferedState, raw: any): void {
