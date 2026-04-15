@@ -95,6 +95,12 @@ export async function streamOpenAIToAnthropic(
 
   try {
     for await (const chunk of openaiStream) {
+      logger.debug('=== OpenAI Stream Chunk ===', {
+        hasContent: !!chunk.choices[0]?.delta?.content,
+        content: chunk.choices[0]?.delta?.content?.substring(0, 200),
+        finishReason: chunk.choices[0]?.finish_reason,
+        usage: chunk.usage,
+      });
       processChunk(chunk, state, raw);
     }
 
@@ -366,6 +372,10 @@ function sendErrorEvent(error: Error, state: StreamingState, raw: any): void {
 }
 
 function sendSSE(data: any, raw: any): void {
+  logger.debug('=== AnthropicStreamEvent ===', {
+    type: data.type,
+    data: JSON.stringify(data).substring(0, 200),
+  });
   raw.write(`event: ${data.type}\n`);
   raw.write(`data: ${JSON.stringify(data)}\n\n`);
 }

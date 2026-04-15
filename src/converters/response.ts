@@ -66,6 +66,14 @@ export function convertResponseToAnthropic(
 
   // Map finish reason
   const stopReason = mapFinishReason(choice.finish_reason);
+  logger.debug('=== OpenAIChatResponse ===', {
+    model: openaiResponse.model,
+    finish_reason: choice.finish_reason,
+    stop_reason: stopReason,
+    usage: openaiResponse.usage,
+    content_blocks: content.length,
+    has_tool_calls: !!message.tool_calls?.length,
+  });
 
   // Build usage - include all cache-related tokens
   const usage: AnthropicUsage = {

@@ -3,293 +3,315 @@
 import { Command } from 'commander';
 import inquirer from 'inquirer';
 import { AdapterConfig } from './types/config';
-import {
-    loadConfig,
-    saveConfig,
-    updateClaudeJson,
-    updateClaudeSettings
-} from './utils/config';
+import { loadConfig, saveConfig, updateClaudeJson, updateClaudeSettings } from './utils/config';
 import { createServer, findAvailablePort } from './server';
 import { UI } from './utils/ui';
 import { checkForUpdates } from './utils/update';
 import { getMetadata } from './utils/metadata';
+import { Logger } from './utils/logger';
 import { version } from '../package.json';
 
 const program = new Command();
 
 program
-    .name('claude-adapter')
-    .description('Proxy adapter to use OpenAI API with Claude Code')
-    .version(version);
+  .name('claude-adapter')
+  .description('Proxy adapter to use OpenAI API with Claude Code')
+  .version(version);
 
 program
-    .option('-p, --port <port>', 'Port to run the proxy server on', '3080')
-    .option('-r, --reconfigure', 'Force reconfiguration even if config exists')
-    .option('--no-claude-settings', 'Skip updating Claude Code settings files')
-    .action(async (options) => {
-        UI.banner();
-        UI.header('Adapt any model for Claude Code');
+  .option('-p, --port <port>', 'Port to run the proxy server on', '3080')
+  .option('-r, --reconfigure', 'Force reconfiguration even if config exists')
+  .option('--no-claude-settings', 'Skip updating Claude Code settings files')
+  .option('-l, --log-level <level>', 'Log level (DEBUG, INFO, WARN, ERROR)')
+  .action(async (options) => {
+    UI.banner();
+    UI.header('Adapt any model for Claude Code');
 
-        try {
-            // Initialize metadata (creates metadata.json on first run)
-            getMetadata();
+    if (options.logLevel) {
+      const validLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+      if (validLevels.includes(options.logLevel.toUpperCase())) {
+        Logger.setGlobalLevel(
+          options.logLevel.toUpperCase() as 'DEBUG' | 'INFO' | 'WARN' | 'ERROR'
+        );
+      }
+    }
 
-            // Step 1: Update ~/.claude.json for onboarding skip (if enabled)
-            if (options.claudeSettings) {
-                updateClaudeJson();
-                UI.statusDone(true, 'Initialized Claude Adapter');
-            } else {
-                UI.info('Skipping Claude settings update (--no-claude-settings)');
-            }
+    try {
+      // Initialize metadata (creates metadata.json on first run)
+      getMetadata();
 
-            // Step 2: Load or create configuration
-            let config = loadConfig();
+      // Step 1: Update ~/.claude.json for onboarding skip (if enabled)
+      if (options.claudeSettings) {
+        updateClaudeJson();
+        UI.statusDone(true, 'Initialized Claude Adapter');
+      } else {
+        UI.info('Skipping Claude settings update (--no-claude-settings)');
+      }
 
-            if (!config || options.reconfigure) {
-                UI.log(''); // Spacing
-                config = await promptForConfiguration();
-                saveConfig(config);
-                console.log(`\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat?.toUpperCase() || 'NATIVE'}]`)}`);
-                UI.info('Creating Claude Adapter API...');
-            } else if (config.toolFormat === undefined) {
-                // Existing config missing toolFormat - prompt only for that
-                UI.log(''); // Spacing
-                const toolStyle = await promptForToolCallingStyle();
-                config.toolFormat = toolStyle;
-                saveConfig(config);
-                console.log(`\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat.toUpperCase()}]`)}`);
-                UI.info('Tool calling preference saved');
-            } else {
-                UI.info('Using existing configuration');
-                console.log(`\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat.toUpperCase()}]`)}`);
-            }
+      // Step 2: Load or create configuration
+      let config = loadConfig();
 
-            // Step 3: Find available port and start server
-            const preferredPort = parseInt(options.port, 10) || 3080;
-            const port = await findAvailablePort(preferredPort);
+      if (!config || options.reconfigure) {
+        UI.log(''); // Spacing
+        config = await promptForConfiguration();
+        saveConfig(config);
+        console.log(
+          `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat?.toUpperCase() || 'NATIVE'}]`)}`
+        );
+        UI.info('Creating Claude Adapter API...');
+      } else if (config.toolFormat === undefined) {
+        // Existing config missing toolFormat - prompt only for that
+        UI.log(''); // Spacing
+        const toolStyle = await promptForToolCallingStyle();
+        config.toolFormat = toolStyle;
+        saveConfig(config);
+        console.log(
+          `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat.toUpperCase()}]`)}`
+        );
+        UI.info('Tool calling preference saved');
+      } else {
+        UI.info('Using existing configuration');
+        console.log(
+          `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat.toUpperCase()}]`)}`
+        );
+      }
 
-            const server = createServer(config);
-            const proxyUrl = await server.start(port);
-            UI.statusDone(true, `Claude Adapter running at ${UI.newUrl(proxyUrl)}`);
+      // Step 3: Find available port and start server
+      const preferredPort = parseInt(options.port, 10) || 3080;
+      const port = await findAvailablePort(preferredPort);
 
-            // Step 4: Update Claude Code settings (if enabled)
-            if (options.claudeSettings) {
-                updateClaudeSettings(proxyUrl, config.models);
-                UI.statusDone(true, 'Models configured:');
+      const server = createServer(config);
+      const proxyUrl = await server.start(port);
+      UI.statusDone(true, `Claude Adapter running at ${UI.newUrl(proxyUrl)}`);
 
-                // Display configured models
-                UI.table([
-                    { label: 'Opus', value: config.models.opus },
-                    { label: 'Sonnet', value: config.models.sonnet },
-                    { label: 'Haiku', value: config.models.haiku }
-                ]);
-            } else {
-                UI.info('Claude Code settings not updated (use manual configuration)');
-                UI.hint(`Set ANTHROPIC_BASE_URL=${proxyUrl} in your Claude Code settings`);
-            }
+      // Step 4: Update Claude Code settings (if enabled)
+      if (options.claudeSettings) {
+        updateClaudeSettings(proxyUrl, config.models);
+        UI.statusDone(true, 'Models configured:');
 
-            UI.success('Claude Adapter is ready!');
-            UI.info('Open a new terminal tab and run Claude Code.');
-            UI.hint('Press Ctrl+C to stop the proxy server.');
+        // Display configured models
+        UI.table([
+          { label: 'Opus', value: config.models.opus },
+          { label: 'Sonnet', value: config.models.sonnet },
+          { label: 'Haiku', value: config.models.haiku },
+        ]);
+      } else {
+        UI.info('Claude Code settings not updated (use manual configuration)');
+        UI.hint(`Set ANTHROPIC_BASE_URL=${proxyUrl} in your Claude Code settings`);
+      }
 
-            // Non-blocking update check
-            checkForUpdates().then(update => {
-                if (update?.hasUpdate) {
-                    UI.updateNotify(update.current, update.latest);
-                }
-                UI.log('');
-            });
+      UI.success('Claude Adapter is ready!');
+      UI.info('Open a new terminal tab and run Claude Code.');
+      UI.hint('Press Ctrl+C to stop the proxy server.');
 
-            // Keep the process running
-            process.on('SIGINT', async () => {
-                UI.log('');
-                await server.stop();
-                UI.success('Claude Adapter stopped');
-                process.exit(0);
-            });
-
-        } catch (error) {
-            UI.statusDone(false, 'An error occurred');
-            UI.error('Setup failed', error as Error);
-            process.exit(1);
+      // Non-blocking update check
+      checkForUpdates().then((update) => {
+        if (update?.hasUpdate) {
+          UI.updateNotify(update.current, update.latest);
         }
-    });
+        UI.log('');
+      });
+
+      // Keep the process running
+      process.on('SIGINT', async () => {
+        UI.log('');
+        await server.stop();
+        UI.success('Claude Adapter stopped');
+        process.exit(0);
+      });
+    } catch (error) {
+      UI.statusDone(false, 'An error occurred');
+      UI.error('Setup failed', error as Error);
+      process.exit(1);
+    }
+  });
 
 /**
  * Prompt user for configuration
  */
 async function promptForConfiguration(): Promise<AdapterConfig> {
-    const prefix = UI.dim('?');
+  const prefix = UI.dim('?');
 
-    // Required configuration prompts
-    const requiredAnswers = await inquirer.prompt([
-        {
-            type: 'input',
-            name: 'baseUrl',
-            prefix,
-            message: 'OpenAI-compatible base URL:',
-            default: 'https://api.openai.com/v1',
-            transformer: (input: string) => UI.highlight(input),
-            validate: (input: string) => {
-                try {
-                    new URL(input);
-                    return true;
-                } catch {
-                    return 'Please enter a valid URL';
-                }
-            },
-        },
-        {
-            type: 'password',
-            name: 'apiKey',
-            prefix,
-            message: 'API Key:',
-            mask: '*',
-            transformer: (input: string) => UI.highlight('*'.repeat(input.length)),
-            validate: (input: string) => {
-                if (!input || input.trim() === '') {
-                    return 'API key is required';
-                }
-                return true;
-            },
-        },
-        {
-            type: 'input',
-            name: 'opusModel',
-            prefix,
-            message: 'Alternative model for Opus:',
-            transformer: (input: string) => UI.highlight(input),
-            validate: (input: string) => {
-                if (!input || input.trim() === '') {
-                    return 'Model name is required for Opus';
-                }
-                return true;
-            },
-        },
-    ]);
+  // Required configuration prompts
+  const requiredAnswers = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'baseUrl',
+      prefix,
+      message: 'OpenAI-compatible base URL:',
+      default: 'https://api.openai.com/v1',
+      transformer: (input: string) => UI.highlight(input),
+      validate: (input: string) => {
+        try {
+          new URL(input);
+          return true;
+        } catch {
+          return 'Please enter a valid URL';
+        }
+      },
+    },
+    {
+      type: 'password',
+      name: 'apiKey',
+      prefix,
+      message: 'API Key:',
+      mask: '*',
+      transformer: (input: string) => UI.highlight('*'.repeat(input.length)),
+      validate: (input: string) => {
+        if (!input || input.trim() === '') {
+          return 'API key is required';
+        }
+        return true;
+      },
+    },
+    {
+      type: 'input',
+      name: 'opusModel',
+      prefix,
+      message: 'Alternative model for Opus:',
+      transformer: (input: string) => UI.highlight(input),
+      validate: (input: string) => {
+        if (!input || input.trim() === '') {
+          return 'Model name is required for Opus';
+        }
+        return true;
+      },
+    },
+  ]);
 
-    const opusModel = requiredAnswers.opusModel.trim();
+  const opusModel = requiredAnswers.opusModel.trim();
 
-    // Sonnet prompt
-    const sonnetAnswer = await inquirer.prompt([{
-        type: 'input',
-        name: 'sonnetModel',
-        prefix,
-        message: 'Alternative model for Sonnet:',
-        transformer: (input: string) => input ? UI.highlight(input) : '',
-    }]);
+  // Sonnet prompt
+  const sonnetAnswer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'sonnetModel',
+      prefix,
+      message: 'Alternative model for Sonnet:',
+      transformer: (input: string) => (input ? UI.highlight(input) : ''),
+    },
+  ]);
 
-    const sonnetModel = sonnetAnswer.sonnetModel.trim() || opusModel;
+  const sonnetModel = sonnetAnswer.sonnetModel.trim() || opusModel;
 
-    // If skipped, replace blank line with fallback display
-    if (!sonnetAnswer.sonnetModel.trim()) {
-        process.stdout.write('\x1b[1A\x1b[2K');
-        console.log(`${prefix} Alternative model for Sonnet: ${UI.dim(`[${opusModel}]`)}`);
-    }
+  // If skipped, replace blank line with fallback display
+  if (!sonnetAnswer.sonnetModel.trim()) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(`${prefix} Alternative model for Sonnet: ${UI.dim(`[${opusModel}]`)}`);
+  }
 
-    // Haiku prompt
-    const haikuAnswer = await inquirer.prompt([{
-        type: 'input',
-        name: 'haikuModel',
-        prefix,
-        message: 'Alternative model for Haiku:',
-        transformer: (input: string) => input ? UI.highlight(input) : '',
-    }]);
+  // Haiku prompt
+  const haikuAnswer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'haikuModel',
+      prefix,
+      message: 'Alternative model for Haiku:',
+      transformer: (input: string) => (input ? UI.highlight(input) : ''),
+    },
+  ]);
 
-    const haikuModel = haikuAnswer.haikuModel.trim() || sonnetModel;
+  const haikuModel = haikuAnswer.haikuModel.trim() || sonnetModel;
 
-    // If skipped, replace blank line with fallback display
-    if (!haikuAnswer.haikuModel.trim()) {
-        process.stdout.write('\x1b[1A\x1b[2K');
-        console.log(`${prefix} Alternative model for Haiku: ${UI.dim(`[${sonnetModel}]`)}`);
-    }
+  // If skipped, replace blank line with fallback display
+  if (!haikuAnswer.haikuModel.trim()) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(`${prefix} Alternative model for Haiku: ${UI.dim(`[${sonnetModel}]`)}`);
+  }
 
-    // Tool calling support prompt (after all models are entered)
-    const toolSupportAnswer = await inquirer.prompt([{
+  // Tool calling support prompt (after all models are entered)
+  const toolSupportAnswer = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'supportsTools',
+      prefix,
+      message: 'Do your models support tool/function calling?',
+      choices: [
+        { name: 'Yes', value: true },
+        { name: 'No', value: false },
+      ],
+      default: true,
+    },
+  ]);
+
+  let toolFormat: 'native' | 'xml';
+
+  if (toolSupportAnswer.supportsTools) {
+    // User selected "Yes" - ask for tool type
+    const toolTypeAnswer = await inquirer.prompt([
+      {
         type: 'list',
-        name: 'supportsTools',
+        name: 'toolType',
         prefix,
-        message: 'Do your models support tool/function calling?',
+        message: 'Select tool/function type:',
         choices: [
-            { name: 'Yes', value: true },
-            { name: 'No', value: false }
+          { name: 'XML (Recommended)', value: 'xml' },
+          { name: 'Native (Openai Format)', value: 'native' },
         ],
-        default: true
-    }]);
+        default: 'xml',
+      },
+    ]);
+    toolFormat = toolTypeAnswer.toolType as 'native' | 'xml';
+  } else {
+    // User selected "No" - auto-select xml
+    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
+    toolFormat = 'xml';
+  }
 
-    let toolFormat: 'native' | 'xml';
-
-    if (toolSupportAnswer.supportsTools) {
-        // User selected "Yes" - ask for tool type
-        const toolTypeAnswer = await inquirer.prompt([{
-            type: 'list',
-            name: 'toolType',
-            prefix,
-            message: 'Select tool/function type:',
-            choices: [
-                { name: 'XML (Recommended)', value: 'xml' },
-                { name: 'Native (Openai Format)', value: 'native' }
-            ],
-            default: 'xml'
-        }]);
-        toolFormat = toolTypeAnswer.toolType as 'native' | 'xml';
-    } else {
-        // User selected "No" - auto-select xml
-        console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
-        toolFormat = 'xml';
-    }
-
-    return {
-        baseUrl: requiredAnswers.baseUrl.trim(),
-        apiKey: requiredAnswers.apiKey.trim(),
-        models: {
-            opus: opusModel,
-            sonnet: sonnetModel,
-            haiku: haikuModel,
-        },
-        toolFormat,
-    };
+  return {
+    baseUrl: requiredAnswers.baseUrl.trim(),
+    apiKey: requiredAnswers.apiKey.trim(),
+    models: {
+      opus: opusModel,
+      sonnet: sonnetModel,
+      haiku: haikuModel,
+    },
+    toolFormat,
+  };
 }
 
 /**
  * Prompt only for tool calling style (for existing configs missing this field)
  */
 async function promptForToolCallingStyle(): Promise<'native' | 'xml'> {
-    const prefix = UI.dim('?');
+  const prefix = UI.dim('?');
 
-    const toolSupportAnswer = await inquirer.prompt([{
+  const toolSupportAnswer = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'supportsTools',
+      prefix,
+      message: 'Do your models support tool/function calling?',
+      choices: [
+        { name: 'Yes', value: true },
+        { name: 'No', value: false },
+      ],
+      default: true,
+    },
+  ]);
+
+  if (toolSupportAnswer.supportsTools) {
+    // User selected "Yes" - ask for tool type
+    const toolTypeAnswer = await inquirer.prompt([
+      {
         type: 'list',
-        name: 'supportsTools',
+        name: 'toolType',
         prefix,
-        message: 'Do your models support tool/function calling?',
+        message: 'Select tool/function type:',
         choices: [
-            { name: 'Yes', value: true },
-            { name: 'No', value: false }
+          { name: 'XML (Recommended)', value: 'xml' },
+          { name: 'Native (Openai Format)', value: 'native' },
         ],
-        default: true
-    }]);
-
-    if (toolSupportAnswer.supportsTools) {
-        // User selected "Yes" - ask for tool type
-        const toolTypeAnswer = await inquirer.prompt([{
-            type: 'list',
-            name: 'toolType',
-            prefix,
-            message: 'Select tool/function type:',
-            choices: [
-                { name: 'XML (Recommended)', value: 'xml' },
-                { name: 'Native (Openai Format)', value: 'native' }
-            ],
-            default: 'xml'
-        }]);
-        return toolTypeAnswer.toolType as 'native' | 'xml';
-    } else {
-        // User selected "No" - auto-select xml
-        console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
-        return 'xml';
-    }
+        default: 'xml',
+      },
+    ]);
+    return toolTypeAnswer.toolType as 'native' | 'xml';
+  } else {
+    // User selected "No" - auto-select xml
+    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
+    return 'xml';
+  }
 }
 
 // Run the CLI
 program.parse();
-

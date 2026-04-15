@@ -23,13 +23,10 @@ interface BufferedState {
   toolCallsEmitted: number; // Count of tool calls emitted
 }
 
-// Regex patterns - enhanced for better edge case handling
 const THINK_BLOCK_PATTERN = /<think>[\s\S]*?<\/think>/g;
-// Enhanced: supports escaped quotes in attribute values, multiline attributes
 const TOOL_CODE_PATTERN =
-  /<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*>([\s\S]*?)<\/\s*tool_code\s*>/i;
-// Handle variations in closing tags
-const TOOL_CODE_SELF_CLOSING = /<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*\/>/i;
+  /\s*<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*>([\s\S]*?)<\/\s*tool_code\s*>/i;
+const TOOL_CODE_SELF_CLOSING = /\s*<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*\/>/i;
 const NESTED_TOOL_PATTERN = /<tool\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)">\s*/g;
 const CLOSE_TOOL_PATTERN = /<\/tool>\s*/g;
 
@@ -66,14 +63,26 @@ export async function streamXmlOpenAIToAnthropic(
   raw.setHeader('X-Accel-Buffering', 'no');
 
   try {
+    logger.debug('Starting XML stream processing');
     for await (const chunk of openaiStream) {
+      logger.debug('Received chunk', {
+        hasContent: !!chunk.choices[0]?.delta?.content,
+        contentLength: chunk.choices[0]?.delta?.content?.length || 0,
+        finishReason: chunk.choices[0]?.finish_reason,
+      });
       processChunk(chunk, state, raw);
     }
 
+    logger.debug('Stream iteration complete, flushing remaining');
     // Final flush - emit any remaining text
     flushRemainingContent(state, raw);
     finishStream(state, raw);
+    logger.debug('XML stream finished', {
+      totalTokens: state.outputTokens,
+      toolCallsEmitted: state.toolCallsEmitted,
+    });
   } catch (error) {
+    logger.error('XML stream error', error as Error);
     sendErrorEvent(error as Error, state, raw);
   }
 }
@@ -92,10 +101,25 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
   }
 
   const choice = chunk.choices[0];
-  if (!choice) return;
+  if (!choice) {
+    logger.debug('No choice in chunk', { chunk: JSON.stringify(chunk).substring(0, 200) });
+    return;
+  }
+
+  logger.debug('=== Xml OpenAI Stream Chunk ===', {
+    hasContent: !!choice.delta?.content,
+    content: choice.delta?.content?.substring(0, 300),
+    finishReason: choice.finish_reason,
+    toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
+      id: tc.id,
+      name: tc.function?.name,
+      argsPreview: tc.function?.arguments?.substring(0, 100),
+    })),
+  });
 
   // Send message_start on first chunk
   if (!state.hasStarted) {
+    logger.debug('Sending message_start');
     sendMessageStart(state, raw);
     state.hasStarted = true;
   }
@@ -105,12 +129,20 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
 
   // Add to buffer
   state.buffer += textDelta;
+  logger.debug('Buffer updated', {
+    bufferLength: state.buffer.length,
+    bufferPreview: state.buffer.substring(0, 500),
+  });
 
   // Process buffer for complete tool calls
   processBuffer(state, raw);
 }
 
 function processBuffer(state: BufferedState, raw: any): void {
+  const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
+
+  const toolMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
+
   // Keep processing until no more complete tool calls are found
   let iteration = 0;
   while (true) {
@@ -161,9 +193,12 @@ function processBuffer(state: BufferedState, raw: any): void {
     emitToolUseBlock(toolName, cleanArgs, state, raw);
 
     // Update buffer: remove everything up to and including the tool call
-    // We need to find the position in the ORIGINAL buffer (with think blocks)
-    const originalMatchEnd = state.buffer.indexOf('</tool_code>') + '</tool_code>'.length;
-    state.buffer = state.buffer.substring(originalMatchEnd);
+    // Handle variations in closing tags (with or without leading whitespace)
+    const endTagMatch = state.buffer.match(/\s*<\/tool_code\s*>/i);
+    if (endTagMatch) {
+      const originalMatchEnd = state.buffer.indexOf(endTagMatch[0]) + endTagMatch[0].length;
+      state.buffer = state.buffer.substring(originalMatchEnd);
+    }
   }
 }
 
@@ -195,6 +230,11 @@ function cleanToolArgs(args: string): string {
 }
 
 function emitTextBlock(text: string, state: BufferedState, raw: any): void {
+  logger.debug('Emitting text block', {
+    textPreview: text.substring(0, 100),
+    blockIndex: state.contentBlockIndex,
+  });
+
   // Start text block
   const startEvent = {
     type: 'content_block_start',
@@ -223,6 +263,12 @@ function emitTextBlock(text: string, state: BufferedState, raw: any): void {
 
 function emitToolUseBlock(toolName: string, args: string, state: BufferedState, raw: any): void {
   const toolId = generateToolUseId();
+  logger.debug('Emitting tool use block', {
+    toolName,
+    argsPreview: args.substring(0, 100),
+    toolId,
+    blockIndex: state.contentBlockIndex,
+  });
 
   // Start tool_use block
   const startEvent = {
@@ -281,6 +327,12 @@ function sendMessageStart(state: BufferedState, raw: any): void {
 }
 
 function finishStream(state: BufferedState, raw: any): void {
+  logger.debug('Finishing stream', {
+    stopReason: state.toolCallsEmitted > 0 ? 'tool_use' : 'end_turn',
+    outputTokens: state.outputTokens,
+    toolCallsEmitted: state.toolCallsEmitted,
+  });
+
   // Determine stop reason
   const stopReason = state.toolCallsEmitted > 0 ? 'tool_use' : 'end_turn';
 
@@ -336,6 +388,10 @@ function sendErrorEvent(error: Error, state: BufferedState, raw: any): void {
 }
 
 function sendSSE(data: any, raw: any): void {
+  logger.debug('=== AnthropicStreamEvent ===', {
+    type: data.type,
+    data: JSON.stringify(data).substring(0, 200),
+  });
   raw.write(`event: ${data.type}\n`);
   raw.write(`data: ${JSON.stringify(data)}\n\n`);
 }
