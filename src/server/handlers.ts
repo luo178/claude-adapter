@@ -3,9 +3,13 @@ import { FastifyRequest, FastifyReply } from 'fastify';
 import OpenAI from 'openai';
 import { AnthropicMessageRequest } from '../types/anthropic';
 import { AdapterConfig } from '../types/config';
-import { convertRequestToOpenAI } from '../converters/request';
-import { convertResponseToAnthropic, createErrorResponse } from '../converters/response';
-import { streamOpenAIToAnthropic } from '../converters/streaming';
+import { convertRequestToOpenAI, convertRequestToResponses } from '../converters/request';
+import {
+  convertResponseToAnthropic,
+  convertResponseFromResponses,
+  createErrorResponse,
+} from '../converters/response';
+import { streamOpenAIToAnthropic, streamResponsesToAnthropic } from '../converters/streaming';
 import { streamXmlOpenAIToAnthropic } from '../converters/xmlStreaming';
 import { validateAnthropicRequest, formatValidationErrors } from '../utils/validation';
 import { logger, RequestLogger } from '../utils/logger';
@@ -305,4 +309,132 @@ function handleError(
 
   const errorResponse = createErrorResponse(error, statusCode);
   reply.code(errorResponse.status).send({ error: errorResponse.error });
+}
+
+/**
+ * Handle POST /v1/responses requests
+ */
+export function createResponsesHandler(config: AdapterConfig) {
+  const openai = new OpenAI({
+    baseURL: config.baseUrl,
+    apiKey: config.apiKey,
+  });
+
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const requestId = generateRequestId();
+    const log = logger.withRequestId(requestId);
+    const startTime = Date.now();
+
+    reply.header('X-Request-Id', requestId);
+
+    log.debug('=== Responses API Request ===', {
+      requestId,
+      method: request.method,
+      url: request.url,
+    });
+
+    try {
+      const validation = validateAnthropicRequest(request.body);
+      if (!validation.valid) {
+        const errorMessage = formatValidationErrors(validation.errors);
+        log.warn('Invalid request', { errors: validation.errors });
+        const errorResponse = createErrorResponse(new Error(errorMessage), 400);
+        reply.code(400).send({ error: errorResponse.error });
+        return;
+      }
+
+      const anthropicRequest = request.body as AnthropicMessageRequest;
+      const targetModel = anthropicRequest.model;
+      const isStreaming = anthropicRequest.stream ?? false;
+
+      log.info(`→ ${targetModel} [Responses API]`);
+
+      const toolStyle = config.toolFormat || 'native';
+      const responsesRequest = convertRequestToResponses(anthropicRequest, targetModel, toolStyle);
+
+      log.debug('Responses request', {
+        model: responsesRequest.model,
+        inputCount: responsesRequest.input.length,
+      });
+
+      const chatMessages = responsesRequest.input
+        .filter((item: any) => item.type === 'message')
+        .map((item: any) => ({
+          role: item.role,
+          content:
+            typeof item.content === 'string'
+              ? item.content
+              : item.content?.map((c: any) => c.text || c.image_url).join('\n') || '',
+        }));
+
+      if (isStreaming) {
+        const responseStream = (await openai.chat.completions.create({
+          model: responsesRequest.model,
+          messages: chatMessages as any,
+          stream: true,
+          stream_options: { include_usage: true },
+        })) as AsyncIterable<any>;
+
+        await streamResponsesToAnthropic(responseStream, reply, targetModel, config.baseUrl);
+
+        recordUsage({
+          provider: config.baseUrl,
+          modelName: targetModel,
+          model: responsesRequest.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          streaming: true,
+        });
+
+        return;
+      }
+
+      const response = await openai.chat.completions.create({
+        model: responsesRequest.model,
+        messages: chatMessages as any,
+      });
+
+      log.debug('Chat completion response received', {
+        id: response.id,
+        usage: response.usage,
+      });
+
+      if (response.usage) {
+        recordUsage({
+          provider: config.baseUrl,
+          modelName: targetModel,
+          model: response.model,
+          inputTokens: response.usage.prompt_tokens,
+          outputTokens: response.usage.completion_tokens,
+          streaming: false,
+        });
+      }
+
+      const anthropicResponse = convertResponseFromResponses(response as any, targetModel);
+
+      reply.send(anthropicResponse);
+
+      const duration = Date.now() - startTime;
+      log.debug('=== Responses API Complete ===', {
+        requestId,
+        duration_ms: duration,
+        model: targetModel,
+      });
+    } catch (error) {
+      const body = request.body as any;
+      const duration = Date.now() - startTime;
+      log.error('=== Responses API Failed ===', error as Error, {
+        requestId,
+        duration_ms: duration,
+        model: body?.model ?? 'unknown',
+        provider: config.baseUrl,
+      });
+      handleError(error as Error, reply, log, {
+        requestId,
+        provider: config.baseUrl,
+        modelName: body?.model ?? 'unknown',
+        streaming: false,
+      });
+    }
+  };
 }

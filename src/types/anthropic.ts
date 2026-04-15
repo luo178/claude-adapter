@@ -15,6 +15,7 @@ export interface AnthropicMessageRequest {
   metadata?: {
     user_id?: string;
   };
+  thinking?: AnthropicThinking;
 }
 
 export interface AnthropicMessage {
@@ -35,11 +36,22 @@ export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
-  | AnthropicThinkingBlock;
+  | AnthropicThinkingBlock
+  | AnthropicImageBlock;
 
 export interface AnthropicTextBlock {
   type: 'text';
   text: string;
+}
+
+export interface AnthropicImageBlock {
+  type: 'image';
+  source: {
+    type: 'url' | 'base64';
+    url?: string;
+    media_type?: string;
+    data?: string;
+  };
 }
 
 export interface AnthropicToolUseBlock {

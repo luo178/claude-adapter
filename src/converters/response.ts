@@ -3,8 +3,9 @@ import {
   AnthropicMessageResponse,
   AnthropicContentBlock,
   AnthropicUsage,
+  AnthropicThinkingBlock,
 } from '../types/anthropic';
-import { OpenAIChatResponse, OpenAIToolCall } from '../types/openai';
+import { OpenAIChatResponse, OpenAIToolCall, OpenAIResponsesResponse } from '../types/openai';
 import { logger } from '../utils/logger';
 
 /**
@@ -64,6 +65,20 @@ export function convertResponseToAnthropic(
     });
   }
 
+  let thinkingResult: AnthropicThinkingBlock | undefined;
+  if ((message as any).thinking) {
+    const thinkingData = (message as any).thinking;
+    thinkingResult = {
+      type: 'thinking',
+      thinking: thinkingData.content || '',
+      signature: thinkingData.signature,
+    };
+    content.push(thinkingResult);
+    logger.debug('Response converted with thinking', {
+      signature: thinkingData.signature,
+    });
+  }
+
   // Map finish reason
   const stopReason = mapFinishReason(choice.finish_reason);
   logger.debug('=== OpenAIChatResponse ===', {
@@ -103,6 +118,7 @@ export function convertResponseToAnthropic(
     stop_reason: stopReason,
     stop_sequence: null,
     usage,
+    thinking: thinkingResult,
   };
 }
 
@@ -179,4 +195,92 @@ function mapErrorType(statusCode: number): string {
     default:
       return 'api_error';
   }
+}
+
+/**
+ * Convert OpenAI Responses API response to Anthropic Messages format
+ */
+export function convertResponseFromResponses(
+  openaiResponse: OpenAIResponsesResponse,
+  originalModelRequested: string
+): AnthropicMessageResponse {
+  const content: AnthropicContentBlock[] = [];
+  let thinkingResult: AnthropicThinkingBlock | undefined;
+  let stopReason: 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | null = null;
+
+  for (const output of openaiResponse.output) {
+    if (output.type === 'message' || output.type === 'web_search_call') {
+      if (output.type === 'web_search_call') {
+        continue;
+      }
+      for (const contentBlock of output.content) {
+        if (contentBlock.type === 'output_text') {
+          const textContent: AnthropicContentBlock = { type: 'text', text: contentBlock.text };
+          content.push(textContent);
+
+          if (contentBlock.annotations && contentBlock.annotations.length > 0) {
+            for (const annotation of contentBlock.annotations) {
+              if (annotation.type === 'url_citation') {
+                const urlAnnotation: AnthropicContentBlock = {
+                  type: 'text',
+                  text: `\n[Source: ${annotation.url}${annotation.title ? ` - ${annotation.title}` : ''}]\n`,
+                };
+                content.push(urlAnnotation);
+              }
+            }
+          }
+        }
+      }
+    } else if (output.type === 'reasoning') {
+      const summaryTexts = output.summary.map((s) => s.text).join('\n');
+      if (summaryTexts) {
+        thinkingResult = {
+          type: 'thinking',
+          thinking: summaryTexts,
+        };
+        content.push(thinkingResult);
+      }
+    } else if (output.type === 'function_call') {
+      let input: Record<string, unknown>;
+      try {
+        input = JSON.parse(output.arguments);
+      } catch {
+        input = { raw: output.arguments };
+      }
+      content.push({
+        type: 'tool_use',
+        id: output.id,
+        name: output.name,
+        input,
+      });
+      stopReason = 'tool_use';
+    }
+  }
+
+  if (content.length === 0) {
+    stopReason = 'end_turn';
+  } else if (!stopReason) {
+    stopReason = 'end_turn';
+  }
+
+  const usage: AnthropicUsage = {
+    input_tokens: openaiResponse.usage?.prompt_tokens ?? 0,
+    output_tokens: openaiResponse.usage?.completion_tokens ?? 0,
+  };
+
+  if (openaiResponse.usage?.prompt_tokens_details?.cached_tokens) {
+    usage.cache_read_input_tokens = openaiResponse.usage.prompt_tokens_details.cached_tokens;
+  }
+
+  return {
+    id: `msg_${openaiResponse.id}`,
+    type: 'message',
+    role: 'assistant',
+    content,
+    model: originalModelRequested,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage,
+    thinking: thinkingResult,
+  };
 }

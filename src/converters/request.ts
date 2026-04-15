@@ -6,12 +6,18 @@ import {
   AnthropicToolUseBlock,
   AnthropicToolResultBlock,
   AnthropicSystemContent,
+  AnthropicImageBlock,
 } from '../types/anthropic';
 import {
   OpenAIChatRequest,
   OpenAIMessage,
   OpenAIUserContentPart,
   OpenAIToolMessage,
+  OpenAIReasoning,
+  OpenAIResponsesRequest,
+  OpenAIResponseInputItem,
+  OpenAIResponseMessage,
+  OpenAIResponseInputImage,
 } from '../types/openai';
 import { convertToolsToOpenAI, convertToolChoiceToOpenAI } from './tools';
 import { generateXmlToolInstructions } from './xmlPrompt';
@@ -131,6 +137,11 @@ export function convertRequestToOpenAI(
   }
   // Note: metadata.user_id is intentionally NOT mapped to OpenAI's 'user' field
   // because some providers (e.g., Mistral) strictly reject unsupported parameters
+
+  // Convert thinking/reasoning parameter
+  if (anthropicRequest.thinking && anthropicRequest.thinking.type === 'enabled') {
+    openaiRequest.reasoning = convertThinkingToOpenAI(anthropicRequest.thinking);
+  }
 
   // Convert tools (only in native mode)
   if (toolFormat === 'native' && anthropicRequest.tools && anthropicRequest.tools.length > 0) {
@@ -427,4 +438,254 @@ function processAssistantContentBlocks(
   }
 
   return { textContent, toolCalls };
+}
+
+function convertThinkingToOpenAI(thinking: {
+  type: string;
+  budget_tokens: number;
+}): OpenAIReasoning {
+  const budgetTokens = thinking.budget_tokens;
+
+  let effort: 'low' | 'medium' | 'high';
+  if (budgetTokens <= 1024) {
+    effort = 'low';
+  } else if (budgetTokens <= 4096) {
+    effort = 'medium';
+  } else {
+    effort = 'high';
+  }
+
+  return {
+    effort,
+    summary: 'detailed',
+  } as OpenAIReasoning;
+}
+
+/**
+ * Convert Anthropic Messages API request to OpenAI Responses format
+ * Responses API uses different structure: `input` instead of `messages`,
+ * `instructions` instead of `system` role
+ */
+export function convertRequestToResponses(
+  anthropicRequest: AnthropicMessageRequest,
+  targetModel: string,
+  toolFormat: 'native' | 'xml' = 'native'
+): OpenAIResponsesRequest {
+  const input: OpenAIResponseInputItem[] = [];
+
+  // Handle system prompt - becomes instructions field (not in input array)
+  let instructions: string | undefined;
+  if (anthropicRequest.system) {
+    const systemContent =
+      typeof anthropicRequest.system === 'string'
+        ? anthropicRequest.system
+        : anthropicRequest.system.map((s: AnthropicSystemContent) => s.text).join('\n');
+
+    // Apply Claude Adapter branding
+    instructions = modifySystemPromptForClaudeAdapter(systemContent);
+
+    // XML mode: inject tool instructions into instructions
+    if (toolFormat === 'xml' && anthropicRequest.tools && anthropicRequest.tools.length > 0) {
+      const xmlInstructions = generateXmlToolInstructions(anthropicRequest.tools);
+      instructions += '\n\n' + xmlInstructions;
+    }
+  }
+
+  // Track tool ID deduplication
+  const idDeduplication = {
+    seenIds: new Set<string>(),
+    idMappings: new Map<string, string[]>(),
+    resultIndex: new Map<string, number>(),
+  };
+
+  // Convert messages to input items
+  for (const msg of anthropicRequest.messages) {
+    const converted = convertMessageToResponseInput(msg, idDeduplication, toolFormat);
+    input.push(...converted);
+  }
+
+  // Azure fix for max_tokens
+  const maxTokens = anthropicRequest.max_tokens === 1 ? 32 : anthropicRequest.max_tokens;
+
+  const responsesRequest: OpenAIResponsesRequest = {
+    model: targetModel,
+    input,
+    instructions,
+    max_output_tokens: maxTokens,
+    stream: anthropicRequest.stream,
+  };
+
+  // Include usage data for streaming
+  if (anthropicRequest.stream) {
+    // Note: Responses API handles streaming differently
+  }
+
+  // Optional parameters
+  if (anthropicRequest.temperature !== undefined) {
+    responsesRequest.temperature = anthropicRequest.temperature;
+  }
+  if (toolFormat === 'xml') {
+    responsesRequest.temperature = 0;
+  }
+  if (anthropicRequest.top_p !== undefined) {
+    responsesRequest.top_p = anthropicRequest.top_p;
+  }
+
+  // Convert thinking/reasoning
+  if (anthropicRequest.thinking && anthropicRequest.thinking.type === 'enabled') {
+    responsesRequest.reasoning = convertThinkingToOpenAI(anthropicRequest.thinking);
+  }
+
+  // Convert tools (Responses API uses different format)
+  if (toolFormat === 'native' && anthropicRequest.tools && anthropicRequest.tools.length > 0) {
+    logger.debug('Responses request converted with tools', {
+      toolCount: anthropicRequest.tools.length,
+    });
+  }
+
+  return responsesRequest;
+}
+
+/**
+ * Convert Anthropic message to Responses API input item format
+ */
+function convertMessageToResponseInput(
+  msg: AnthropicMessage,
+  ctx: IdDeduplicationContext,
+  toolFormat: 'native' | 'xml'
+): OpenAIResponseInputItem[] {
+  const result: OpenAIResponseInputItem[] = [];
+
+  if (typeof msg.content === 'string') {
+    if (msg.role === 'user') {
+      result.push({ type: 'message', role: 'user', content: msg.content });
+    } else {
+      if (isAssistantPrefill(msg.content)) {
+        return result;
+      }
+      result.push({ type: 'message', role: 'assistant', content: msg.content });
+    }
+  } else {
+    if (msg.role === 'user') {
+      const { userContent, toolResults } = processUserContentBlocksForResponses(msg.content, ctx);
+
+      // Add tool results as message items
+      for (const tr of toolResults) {
+        result.push({
+          type: 'message',
+          role: 'tool',
+          content: tr.content,
+          tool_call_id: tr.tool_call_id,
+        });
+      }
+
+      // Add user content
+      if (userContent.length > 0) {
+        const transformedContent = transformContentParts(userContent);
+        result.push({ type: 'message', role: 'user', content: transformedContent });
+      }
+    } else {
+      const { textContent, toolCalls } = processAssistantContentBlocks(msg.content, ctx);
+
+      if (toolCalls.length === 0 && textContent && isAssistantPrefill(textContent)) {
+        return result;
+      }
+
+      const msgObj: OpenAIResponseMessage = {
+        type: 'message',
+        role: 'assistant',
+        content: textContent || '',
+      };
+
+      if (toolCalls.length > 0) {
+        msgObj.tool_calls = toolCalls.map((tc) => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          },
+        }));
+      }
+
+      result.push(msgObj);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Process user content blocks for Responses API format
+ */
+function processUserContentBlocksForResponses(
+  blocks: AnthropicContentBlock[],
+  ctx: IdDeduplicationContext
+): {
+  userContent: { type: 'text'; text: string }[];
+  toolResults: OpenAIToolMessage[];
+} {
+  const userContent: { type: 'text'; text: string }[] = [];
+  const toolResults: OpenAIToolMessage[] = [];
+
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      userContent.push({ type: 'text', text: block.text });
+    } else if (block.type === 'image') {
+      const imageBlock = block as AnthropicImageBlock;
+      let url = '';
+      if (imageBlock.source.type === 'url' && imageBlock.source.url) {
+        url = imageBlock.source.url;
+      } else if (imageBlock.source.type === 'base64') {
+        const mediaType = imageBlock.source.media_type || 'image/png';
+        const base64Data = imageBlock.source.data;
+        url = `data:${mediaType};base64,${base64Data}`;
+      }
+      if (url) {
+        (userContent as any).push({
+          type: 'image_url',
+          image_url: { url, detail: 'high' },
+        });
+      }
+    } else if (block.type === 'tool_result') {
+      const toolResult = block as AnthropicToolResultBlock;
+      let content: string;
+
+      if (typeof toolResult.content === 'string') {
+        content = toolResult.content;
+      } else if (Array.isArray(toolResult.content)) {
+        content = toolResult.content
+          .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+          .map((c) => c.text)
+          .join('\n');
+      } else {
+        content = '';
+      }
+
+      let toolCallId = toolResult.tool_use_id;
+      if (ctx.idMappings.has(toolResult.tool_use_id)) {
+        const mappings = ctx.idMappings.get(toolResult.tool_use_id)!;
+        const idx = ctx.resultIndex.get(toolResult.tool_use_id) || 0;
+        if (idx < mappings.length) {
+          toolCallId = mappings[idx];
+          ctx.resultIndex.set(toolResult.tool_use_id, idx + 1);
+        }
+      }
+
+      toolResults.push({
+        role: 'tool',
+        tool_call_id: toolCallId,
+        content: toolResult.is_error ? `Error: ${content}` : content,
+      });
+    }
+  }
+
+  return { userContent, toolResults };
+}
+
+/**
+ * Transform content parts for Responses API
+ */
+function transformContentParts(parts: { type: 'text'; text: string }[]): string {
+  return parts.map((p) => p.text).join('\n');
 }

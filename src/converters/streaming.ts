@@ -54,6 +54,10 @@ interface StreamingState {
   cachedInputTokens: number;
   hasStarted: boolean;
   textContent: string;
+  thinkingContent: string;
+  thinkingSignature: string;
+  isThinkingBlock: boolean;
+  hasTextContentStarted: boolean;
 }
 
 /**
@@ -77,6 +81,10 @@ export async function streamOpenAIToAnthropic(
     cachedInputTokens: 0,
     hasStarted: false,
     textContent: '',
+    thinkingContent: '',
+    thinkingSignature: '',
+    isThinkingBlock: false,
+    hasTextContentStarted: false,
   };
 
   logger.debug('Streaming conversion started', {
@@ -135,11 +143,42 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
 
   const delta = choice.delta;
 
+  // Handle thinking/reasoning content
+  if (delta.reasoning) {
+    if (delta.reasoning.content && !state.isThinkingBlock) {
+      sendThinkingBlockStart(state.contentBlockIndex, '', raw);
+      state.isThinkingBlock = true;
+    }
+
+    if (delta.reasoning.content) {
+      state.thinkingContent += delta.reasoning.content;
+      sendThinkingDelta(state.contentBlockIndex, delta.reasoning.content, raw);
+    }
+
+    if (delta.reasoning.signature) {
+      state.thinkingSignature = delta.reasoning.signature;
+      sendThinkingSignature(state.contentBlockIndex, delta.reasoning.signature, raw);
+      sendContentBlockStop(state.contentBlockIndex, raw);
+      state.contentBlockIndex++;
+      state.isThinkingBlock = false;
+      state.thinkingContent = '';
+    }
+  }
+
   // Handle text content
   if (delta.content) {
+    // Close thinking block if open before starting text
+    if (state.isThinkingBlock) {
+      sendContentBlockStop(state.contentBlockIndex, raw);
+      state.contentBlockIndex++;
+      state.isThinkingBlock = false;
+      state.thinkingContent = '';
+    }
+
     // If this is the first text content, start a text block
-    if (state.textContent === '' && state.contentBlockIndex === 0) {
+    if (!state.hasTextContentStarted) {
       sendContentBlockStart(state.contentBlockIndex, 'text', '', raw);
+      state.hasTextContentStarted = true;
     }
 
     state.textContent += delta.content;
@@ -155,6 +194,13 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
 
   // Handle finish reason
   if (choice.finish_reason) {
+    // Close any open thinking block
+    if (state.isThinkingBlock) {
+      sendContentBlockStop(state.contentBlockIndex, raw);
+      state.contentBlockIndex++;
+      state.isThinkingBlock = false;
+    }
+
     // Close any open text block
     if (state.textContent !== '') {
       sendContentBlockStop(state.contentBlockIndex, raw);
@@ -281,6 +327,42 @@ function sendTextDelta(index: number, text: string, raw: any): void {
   sendSSE(event, raw);
 }
 
+function sendThinkingBlockStart(index: number, thinking: string, raw: any): void {
+  const event = {
+    type: 'content_block_start',
+    index,
+    content_block: {
+      type: 'thinking',
+      thinking: thinking,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function sendThinkingDelta(index: number, thinking: string, raw: any): void {
+  const event = {
+    type: 'content_block_delta',
+    index,
+    delta: {
+      type: 'thinking_delta',
+      thinking,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function sendThinkingSignature(index: number, signature: string, raw: any): void {
+  const event = {
+    type: 'content_block_delta',
+    index,
+    delta: {
+      type: 'signature_delta',
+      signature,
+    },
+  };
+  sendSSE(event, raw);
+}
+
 function sendInputJsonDelta(index: number, partialJson: string, raw: any): void {
   const event = {
     type: 'content_block_delta',
@@ -378,4 +460,379 @@ function sendSSE(data: any, raw: any): void {
   });
   raw.write(`event: ${data.type}\n`);
   raw.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+// ============================================
+// Responses API Streaming Handler
+// ============================================
+
+interface ResponsesStreamingState {
+  messageId: string;
+  model: string;
+  responseModel: string;
+  provider: string;
+  contentBlockIndex: number;
+  textContent: string;
+  thinkingContent: string;
+  thinkingSignature: string;
+  isThinkingBlock: boolean;
+  hasTextContentStarted: boolean;
+  currentToolCallId: string;
+  currentToolCallName: string;
+  currentToolCallArgs: string;
+}
+
+export async function streamResponsesToAnthropic(
+  responseStream: any,
+  reply: FastifyReply,
+  originalModel: string,
+  provider: string = ''
+): Promise<void> {
+  const state: ResponsesStreamingState = {
+    messageId: `msg_${Date.now().toString(36)}`,
+    model: originalModel,
+    responseModel: '',
+    provider,
+    contentBlockIndex: 0,
+    textContent: '',
+    thinkingContent: '',
+    thinkingSignature: '',
+    isThinkingBlock: false,
+    hasTextContentStarted: false,
+    currentToolCallId: '',
+    currentToolCallName: '',
+    currentToolCallArgs: '',
+  };
+
+  logger.debug('Responses streaming started', { model: originalModel, provider });
+
+  const raw = reply.raw;
+  raw.setHeader('Content-Type', 'text/event-stream');
+  raw.setHeader('Cache-Control', 'no-cache');
+  raw.setHeader('Connection', 'keep-alive');
+  raw.setHeader('X-Accel-Buffering', 'no');
+
+  responsesSendMessageStart(state, raw);
+
+  try {
+    for await (const event of responseStream) {
+      responsesProcessEvent(event, state, raw);
+    }
+    responsesFinishStream(state, raw);
+  } catch (error) {
+    responsesSendError(error as Error, state, raw);
+  }
+}
+
+function responsesSendMessageStart(state: ResponsesStreamingState, raw: any): void {
+  const event = {
+    type: 'message_start',
+    message: {
+      id: state.messageId,
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      model: state.model,
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function responsesSendContentBlockStart(
+  state: ResponsesStreamingState,
+  blockType: string,
+  raw: any
+): void {
+  const contentBlock: any =
+    blockType === 'thinking'
+      ? { type: 'thinking', thinking: '' }
+      : blockType === 'tool_use'
+        ? {
+            type: 'tool_use',
+            id: state.currentToolCallId || generateToolUseId(),
+            name: state.currentToolCallName,
+            input: {},
+          }
+        : { type: 'text', text: '' };
+
+  const event = {
+    type: 'content_block_start',
+    index: state.contentBlockIndex,
+    content_block: contentBlock,
+  };
+  sendSSE(event, raw);
+}
+
+function responsesSendContentBlockDelta(index: number, text: string, raw: any): void {
+  const event = {
+    type: 'content_block_delta',
+    index,
+    delta: {
+      type: 'text_delta',
+      text,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function responsesProcessEvent(event: any, state: ResponsesStreamingState, raw: any): void {
+  const eventType = event.type;
+
+  switch (eventType) {
+    case 'response.created':
+      state.responseModel = event.response?.model || '';
+      break;
+
+    case 'response.output_item.added':
+      responsesHandleOutputItemAdded(event, state, raw);
+      break;
+
+    case 'response.content_block.delta':
+      responsesHandleContentBlockDelta(event, state, raw);
+      break;
+
+    case 'response.content_block.stop':
+      responsesHandleContentBlockStop(event, state, raw);
+      break;
+
+    case 'response.completed': {
+      const messageEvent = {
+        type: 'message_delta',
+        delta: {
+          stop_reason: event.stop_reason || 'end_turn',
+        },
+      };
+      sendSSE(messageEvent, raw);
+      break;
+    }
+
+    case 'response.incomplete': {
+      const incompleteEvent = {
+        type: 'message_delta',
+        delta: {
+          stop_reason: 'max_tokens',
+        },
+      };
+      sendSSE(incompleteEvent, raw);
+      break;
+    }
+  }
+}
+
+function responsesHandleOutputItemAdded(
+  event: any,
+  state: ResponsesStreamingState,
+  raw: any
+): void {
+  const item = event.item;
+  if (!item) return;
+
+  if (item.type === 'message') {
+    state.contentBlockIndex = 0;
+    state.isThinkingBlock = false;
+    state.hasTextContentStarted = false;
+    state.textContent = '';
+  } else if (item.type === 'reasoning') {
+    state.isThinkingBlock = true;
+    state.thinkingContent = '';
+    responsesSendContentBlockStart(state, 'thinking', raw);
+  } else if (item.type === 'function_call') {
+    state.currentToolCallId = item.id || '';
+    state.currentToolCallName = item.name || '';
+    state.currentToolCallArgs = '';
+    responsesSendContentBlockStart(state, 'tool_use', raw);
+  }
+}
+
+function responsesHandleContentBlockDelta(
+  event: any,
+  state: ResponsesStreamingState,
+  raw: any
+): void {
+  const delta = event.delta;
+  if (!delta) return;
+
+  if (delta.type === 'output_text') {
+    const text = delta.text || '';
+    state.textContent += text;
+    state.hasTextContentStarted = true;
+
+    if (state.isThinkingBlock) {
+      state.thinkingContent += text;
+      responsesSendThinkingDelta(text, raw);
+    } else {
+      responsesSendContentBlockDelta(state.contentBlockIndex, text, raw);
+    }
+  } else if (delta.type === 'reasoning_summary') {
+    const summary = delta.summary || '';
+    state.thinkingContent += summary;
+    responsesSendThinkingDelta(summary, raw);
+  } else if (delta.type === 'function_call_arguments') {
+    const args = delta.arguments || '';
+    state.currentToolCallArgs += args;
+    sendToolCallDelta(
+      state.currentToolCallId,
+      state.currentToolCallName,
+      state.currentToolCallArgs,
+      raw
+    );
+  }
+}
+
+function responsesHandleContentBlockStop(
+  event: any,
+  state: ResponsesStreamingState,
+  raw: any
+): void {
+  const index = event.index ?? state.contentBlockIndex;
+
+  if (state.isThinkingBlock) {
+    sendThinkingStop(raw);
+    state.isThinkingBlock = false;
+  } else if (state.currentToolCallId) {
+    sendToolCallStop(
+      state.currentToolCallId,
+      state.currentToolCallName,
+      state.currentToolCallArgs,
+      raw
+    );
+    state.currentToolCallId = '';
+    state.currentToolCallName = '';
+    state.currentToolCallArgs = '';
+  }
+
+  state.contentBlockIndex++;
+}
+
+function handleResponseCompleted(event: any, state: ResponsesStreamingState, raw: any): void {
+  const usage = event.response?.usage || {};
+  const messageEvent = {
+    type: 'message_delta',
+    delta: {
+      stop_reason: 'end_turn',
+      stop_sequence: null,
+    },
+    usage: {
+      output_tokens: usage.completion_tokens || 0,
+    },
+  };
+  sendSSE(messageEvent, raw);
+}
+
+function handleResponseIncomplete(event: any, state: ResponsesStreamingState, raw: any): void {
+  const messageEvent = {
+    type: 'message_delta',
+    delta: {
+      stop_reason: 'max_tokens',
+      stop_sequence: null,
+    },
+    usage: {
+      output_tokens: 0,
+    },
+  };
+  sendSSE(messageEvent, raw);
+}
+
+function responsesFinishStream(state: ResponsesStreamingState, raw: any): void {
+  const event = {
+    type: 'message_stop',
+  };
+  sendSSE(event, raw);
+  raw.end();
+}
+
+function responsesSendError(error: Error, state: ResponsesStreamingState, raw: any): void {
+  logger.error('Responses streaming error', error);
+  const event = {
+    type: 'error',
+    error: {
+      type: 'api_error',
+      message: error.message,
+    },
+  };
+  sendSSE(event, raw);
+  raw.end();
+}
+
+function sendResponsesContentBlockStart(
+  state: ResponsesStreamingState,
+  blockType: string,
+  raw: any
+): void {
+  const event: any = {
+    type: 'content_block_start',
+    index: state.contentBlockIndex,
+    content_block: {
+      type: blockType,
+    },
+  };
+
+  if (blockType === 'tool_use') {
+    event.content_block.id = state.currentToolCallId || `toolu_${Date.now().toString(36)}`;
+    event.content_block.name = state.currentToolCallName;
+  } else if (blockType === 'thinking') {
+    event.content_block.thinking = '';
+  }
+
+  sendSSE(event, raw);
+}
+
+function sendResponsesContentBlockDelta(text: string, index: number, raw: any): void {
+  const event = {
+    type: 'content_block_delta',
+    index,
+    delta: {
+      type: 'text_delta',
+      text,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function responsesSendThinkingDelta(text: string, raw: any): void {
+  const event = {
+    type: 'content_block_delta',
+    index: 0,
+    delta: {
+      type: 'thinking_delta',
+      thinking: text,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function sendThinkingStop(raw: any): void {
+  const event = {
+    type: 'content_block_stop',
+    index: 0,
+  };
+  sendSSE(event, raw);
+}
+
+function sendToolCallDelta(
+  toolCallId: string,
+  toolCallName: string,
+  partialArgs: string,
+  raw: any
+): void {
+  const event = {
+    type: 'content_block_delta',
+    index: 0,
+    delta: {
+      type: 'input_json_delta',
+      partial_json: partialArgs,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function sendToolCallStop(toolCallId: string, toolCallName: string, args: string, raw: any): void {
+  const event = {
+    type: 'content_block_stop',
+    index: 0,
+  };
+  sendSSE(event, raw);
 }
