@@ -136,8 +136,7 @@ async function promptForConfiguration(
   const prefix = UI.dim('?');
   const hasExistingConfig = !!existingConfig?.apiKey;
 
-  // Required configuration prompts
-  const requiredAnswers = await inquirer.prompt([
+  const baseUrlAnswer = await inquirer.prompt([
     {
       type: 'input',
       name: 'baseUrl',
@@ -152,20 +151,6 @@ async function promptForConfiguration(
         } catch {
           return 'Please enter a valid URL';
         }
-      },
-    },
-    {
-      type: 'input',
-      name: 'opusModel',
-      prefix,
-      message: 'Alternative model for Opus:',
-      default: existingConfig?.models?.opus,
-      transformer: (input: string) => UI.highlight(input),
-      validate: (input: string) => {
-        if (!input || input.trim() === '') {
-          return 'Model name is required for Opus';
-        }
-        return true;
       },
     },
   ]);
@@ -199,7 +184,24 @@ async function promptForConfiguration(
     console.log(`${prefix} API Key: ${UI.dim('[existing]')}`);
   }
 
-  const opusModel = requiredAnswers.opusModel.trim();
+  const opusModelAnswer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'opusModel',
+      prefix,
+      message: 'Alternative model for Opus:',
+      default: existingConfig?.models?.opus,
+      transformer: (input: string) => UI.highlight(input),
+      validate: (input: string) => {
+        if (!input || input.trim() === '') {
+          return 'Model name is required for Opus';
+        }
+        return true;
+      },
+    },
+  ]);
+
+  const opusModel = opusModelAnswer.opusModel.trim();
 
   // Sonnet prompt
   const sonnetAnswer = await inquirer.prompt([
@@ -367,8 +369,8 @@ async function promptForConfiguration(
   }
 
   return {
-    baseUrl: requiredAnswers.baseUrl.trim(),
-    apiKey: requiredAnswers.apiKey.trim(),
+    baseUrl: baseUrlAnswer.baseUrl.trim(),
+    apiKey: apiKey,
     models: {
       opus: opusModel,
       sonnet: sonnetModel,
