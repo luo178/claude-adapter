@@ -183,7 +183,7 @@ async function promptForConfiguration(
         transformer: (input: string) => UI.highlight('*'.repeat(input.length)),
         validate: (input: string) => {
           if (!input || input.trim() === '') {
-            return 'API key is required';
+            return hasExistingConfig ? true : 'API key is required';
           }
           return true;
         },
@@ -191,8 +191,6 @@ async function promptForConfiguration(
     ]);
     if (apiKeyAnswer.apiKey.trim()) {
       apiKey = apiKeyAnswer.apiKey.trim();
-    } else if (!hasExistingConfig) {
-      return promptForConfiguration(existingConfig);
     }
   }
 
