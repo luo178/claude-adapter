@@ -273,7 +273,7 @@ function handleConsecutiveToolCodeTags(
   state: BufferedState,
   raw: any
 ): boolean {
-  const toolCodeRegex = /<\s*tool_code[\s>]/gi;
+  const toolCodeRegex = /<\s*tool_code\s*>/gi;
   const matches = cleanBuffer.match(toolCodeRegex);
 
   if (!matches || matches.length < 2) return false;
