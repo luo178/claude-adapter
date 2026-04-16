@@ -15,7 +15,7 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
-import { buildClientHeaders, buildCustomHeaders } from './headers';
+import { buildSessionHeaders, buildCustomHeaders } from './headers';
 import { resolveTargetModel } from './modelResolver';
 
 // Request ID counter for unique identification
@@ -32,7 +32,7 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-  const clientHeaders = buildClientHeaders(config.headers);
+  const clientHeaders = buildSessionHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
@@ -333,7 +333,7 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
-  const clientHeaders = buildClientHeaders(config.headers);
+  const clientHeaders = buildSessionHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,

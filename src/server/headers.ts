@@ -1,19 +1,40 @@
 import { CustomHeader } from '../types/config';
 
-export function buildClientHeaders(headers?: CustomHeader[]): Record<string, string> {
+export function buildStaticHeaders(headers?: CustomHeader[]): Record<string, string> {
   if (!headers) {
     return {};
   }
 
-  const clientHeaders: Record<string, string> = {};
+  const result: Record<string, string> = {};
 
   for (const header of headers) {
     if (header.value) {
-      clientHeaders[header.name] = header.value;
+      result[header.name] = header.value;
     }
   }
 
-  return clientHeaders;
+  return result;
+}
+
+export function buildSessionHeaders(headers?: CustomHeader[]): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+
+  const result: Record<string, string> = {};
+
+  for (const header of headers) {
+    if (header.value) {
+      result[header.name] = header.value;
+    }
+
+    if (header.generator) {
+      const generatorFn = new Function(`return ${header.generator}`)();
+      result[header.name] = generatorFn();
+    }
+  }
+
+  return result;
 }
 
 export function buildCustomHeaders(
@@ -27,20 +48,19 @@ export function buildCustomHeaders(
   const customHeaders: Record<string, string> = {};
 
   for (const header of headers) {
-    if (header.value && !header.generator) {
+    if (!header.generator) {
       continue;
     }
 
-    if (header.generator) {
-      if (isStreaming && !header.includeForStreaming) {
-        continue;
-      }
-      if (!isStreaming && !header.includeForNonStreaming) {
-        continue;
-      }
-      const generatorFn = new Function(`return ${header.generator}`)();
-      customHeaders[header.name] = generatorFn();
+    if (isStreaming && !header.includeForStreaming) {
+      continue;
     }
+    if (!isStreaming && !header.includeForNonStreaming) {
+      continue;
+    }
+
+    const generatorFn = new Function(`return ${header.generator}`)();
+    customHeaders[header.name] = generatorFn();
   }
 
   return customHeaders;
