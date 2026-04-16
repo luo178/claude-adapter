@@ -134,6 +134,7 @@ async function promptForConfiguration(
   existingConfig?: AdapterConfig | null
 ): Promise<AdapterConfig> {
   const prefix = UI.dim('?');
+  const hasExistingConfig = !!existingConfig?.apiKey;
 
   // Required configuration prompts
   const requiredAnswers = await inquirer.prompt([
@@ -154,20 +155,6 @@ async function promptForConfiguration(
       },
     },
     {
-      type: 'password',
-      name: 'apiKey',
-      prefix,
-      message: 'API Key:',
-      mask: '*',
-      transformer: (input: string) => UI.highlight('*'.repeat(input.length)),
-      validate: (input: string) => {
-        if (!input || input.trim() === '') {
-          return 'API key is required';
-        }
-        return true;
-      },
-    },
-    {
       type: 'input',
       name: 'opusModel',
       prefix,
@@ -182,6 +169,37 @@ async function promptForConfiguration(
       },
     },
   ]);
+
+  let apiKey = existingConfig?.apiKey || '';
+
+  if (!apiKey || hasExistingConfig) {
+    const apiKeyAnswer = await inquirer.prompt([
+      {
+        type: 'password',
+        name: 'apiKey',
+        prefix,
+        message: hasExistingConfig ? 'API Key (press Enter to keep existing):' : 'API Key:',
+        mask: '*',
+        transformer: (input: string) => UI.highlight('*'.repeat(input.length)),
+        validate: (input: string) => {
+          if (!input || input.trim() === '') {
+            return 'API key is required';
+          }
+          return true;
+        },
+      },
+    ]);
+    if (apiKeyAnswer.apiKey.trim()) {
+      apiKey = apiKeyAnswer.apiKey.trim();
+    } else if (!hasExistingConfig) {
+      return promptForConfiguration(existingConfig);
+    }
+  }
+
+  if (hasExistingConfig) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(`${prefix} API Key: ${UI.dim('[existing]')}`);
+  }
 
   const opusModel = requiredAnswers.opusModel.trim();
 
@@ -240,7 +258,7 @@ async function promptForConfiguration(
       type: 'input',
       name: 'defaultModel',
       prefix,
-      message: 'Default model (for ANTHROPIC_MODEL env):',
+      message: 'Alternative model for Default:',
       default: existingConfig?.models?.default,
       transformer: (input: string) => (input ? UI.highlight(input) : ''),
     },
@@ -312,7 +330,7 @@ async function promptForConfiguration(
   let headers;
   if (headerAnswer.addHeaders) {
     const existingProjectName =
-      existingConfig?.headers?.find((h) => h.name === 'x-opencode-project')?.value || 'my-project';
+      existingConfig?.headers?.find((h) => h.name === 'x-opencode-project')?.value || 'opencode';
 
     const projectNameAnswer = await inquirer.prompt([
       {
@@ -324,13 +342,25 @@ async function promptForConfiguration(
       },
     ]);
     const projectName = projectNameAnswer.projectName.trim() || existingProjectName;
+    const existingClientName =
+      existingConfig?.headers?.find((h) => h.name === 'x-opencode-client')?.value || 'cli';
+
+    const cliNameAnswer = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'clientName',
+        prefix,
+        message: 'Client name:',
+        default: existingClientName,
+      },
+    ]);
+    const clientName = cliNameAnswer.clientName.trim() || existingClientName;
     headers = [
       { name: 'x-opencode-project', value: projectName },
-      { name: 'x-opencode-client', value: 'claude-adapter' },
+      { name: 'x-opencode-client', value: clientName },
       {
         name: 'x-opencode-session',
-        generator:
-          "() => 'ses_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6)",
+        generator: '() => crypto.randomUUID()',
         includeForNonStreaming: true,
         includeForStreaming: true,
       },
