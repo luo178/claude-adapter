@@ -105,29 +105,33 @@ export function updateClaudeSettings(
   }
 
   const existingEnv = settings.env || {};
-  const newEnv: Record<string, string> = {};
+  const mergedEnv: Record<string, string> = {};
 
   MANAGED_ENV_KEYS.forEach((key) => {
     if (key === 'ANTHROPIC_BASE_URL') {
-      newEnv[key] = proxyUrl;
+      mergedEnv[key] = proxyUrl;
     } else if (key === 'ANTHROPIC_AUTH_TOKEN') {
-      newEnv[key] = 'default';
+      mergedEnv[key] = 'default';
     } else if (key === 'ANTHROPIC_MODEL') {
       if (models.default) {
-        newEnv[key] = models.default;
-      } else {
-        delete newEnv[key];
+        mergedEnv[key] = models.default;
       }
     } else if (key === 'ANTHROPIC_DEFAULT_OPUS_MODEL') {
-      newEnv[key] = models.opus;
+      mergedEnv[key] = models.opus;
     } else if (key === 'ANTHROPIC_DEFAULT_SONNET_MODEL') {
-      newEnv[key] = models.sonnet;
+      mergedEnv[key] = models.sonnet;
     } else if (key === 'ANTHROPIC_DEFAULT_HAIKU_MODEL') {
-      newEnv[key] = models.haiku;
+      mergedEnv[key] = models.haiku;
     }
   });
 
-  settings.env = { ...existingEnv, ...newEnv };
+  Object.keys(existingEnv).forEach((key) => {
+    if (!MANAGED_ENV_KEYS.includes(key)) {
+      mergedEnv[key] = existingEnv[key];
+    }
+  });
+
+  settings.env = mergedEnv;
 
   fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
 }
