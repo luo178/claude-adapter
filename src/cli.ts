@@ -219,6 +219,24 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
     console.log(`${prefix} Alternative model for Haiku: ${UI.dim(`[${sonnetModel}]`)}`);
   }
 
+  // Default 模型提示（用于 ANTHROPIC_MODEL 环境变量）
+  const defaultModelAnswer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'defaultModel',
+      prefix,
+      message: 'Default model (for ANTHROPIC_MODEL env):',
+      transformer: (input: string) => (input ? UI.highlight(input) : ''),
+    },
+  ]);
+
+  const defaultModel = defaultModelAnswer.defaultModel.trim() || '';
+
+  if (!defaultModelAnswer.defaultModel.trim()) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(`${prefix} Default model: ${UI.dim('[none]')}`);
+  }
+
   // Tool calling support prompt (after all models are entered)
   const toolSupportAnswer = await inquirer.prompt([
     {
@@ -258,6 +276,43 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
     toolFormat = 'xml';
   }
 
+  // Header 配置提示
+  const headerAnswer = await inquirer.prompt([
+    {
+      type: 'confirm',
+      name: 'addHeaders',
+      prefix,
+      message: 'Add OpenCode headers (x-opencode-*)?',
+      default: false,
+    },
+  ]);
+
+  let headers;
+  if (headerAnswer.addHeaders) {
+    const projectNameAnswer = await inquirer.prompt([
+      {
+        type: 'input',
+        name: 'projectName',
+        prefix,
+        message: 'Project name:',
+        default: 'my-project',
+      },
+    ]);
+    const projectName = projectNameAnswer.projectName.trim() || 'my-project';
+    headers = [
+      { name: 'x-opencode-project', value: projectName },
+      { name: 'x-opencode-client', value: 'claude-adapter' },
+      {
+        name: 'x-opencode-session',
+        generator:
+          "() => 'ses_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6)",
+        includeForNonStreaming: true,
+        includeForStreaming: true,
+      },
+    ];
+    console.log(`\x1b[32m✔\x1b[0m Headers: ${UI.dim('[x-opencode-project, x-opencode-session]')}`);
+  }
+
   return {
     baseUrl: requiredAnswers.baseUrl.trim(),
     apiKey: requiredAnswers.apiKey.trim(),
@@ -265,8 +320,10 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       opus: opusModel,
       sonnet: sonnetModel,
       haiku: haikuModel,
+      ...(defaultModel && { default: defaultModel }),
     },
     toolFormat,
+    ...(headers && { headers }),
   };
 }
 

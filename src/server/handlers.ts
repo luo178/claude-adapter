@@ -15,6 +15,8 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
+import { buildClientHeaders, buildCustomHeaders } from './headers';
+import { resolveTargetModel } from './modelResolver';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
@@ -30,9 +32,11 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
+  const clientHeaders = buildClientHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
+    defaultHeaders: clientHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -40,7 +44,6 @@ export function createMessagesHandler(config: AdapterConfig) {
     const log = logger.withRequestId(requestId);
     const startTime = Date.now();
 
-    // Add request ID to response headers for client tracing
     reply.header('X-Request-Id', requestId);
 
     log.debug('=== Request Info ===', {
@@ -66,10 +69,15 @@ export function createMessagesHandler(config: AdapterConfig) {
       }
 
       const anthropicRequest = request.body as AnthropicMessageRequest;
-      const targetModel = anthropicRequest.model;
       const isStreaming = anthropicRequest.stream ?? false;
 
-      log.info(`→ ${targetModel} [sent]`);
+      const resolved = resolveTargetModel(config, anthropicRequest.model);
+      const targetModel = resolved.targetModel;
+
+      log.info(`→ ${targetModel} [sent]`, {
+        originalModel: resolved.originalModel,
+        resolvedFrom: resolved.resolvedFrom,
+      });
 
       log.debug('=== AnthropicMessageRequest ===', {
         model: anthropicRequest.model,
@@ -118,12 +126,15 @@ export function createMessagesHandler(config: AdapterConfig) {
         log.info(`Using XML tool calling mode (${anthropicRequest.tools.length} tools)`);
       }
 
+      const customHeaders = buildCustomHeaders(config.headers, isStreaming);
+
       if (isStreaming || (toolStyle === 'xml' && anthropicRequest.tools?.length)) {
         log.debug('=== OpenAI API Call ===', {
           url: `${config.baseUrl}/chat/completions`,
           model: openaiRequest.model,
           stream: true,
           toolFormat: toolStyle,
+          customHeaders: Object.keys(customHeaders),
         });
 
         if (toolStyle === 'xml') {
@@ -133,7 +144,8 @@ export function createMessagesHandler(config: AdapterConfig) {
             reply,
             anthropicRequest.model,
             config.baseUrl,
-            log
+            log,
+            customHeaders
           );
         } else {
           await handleStreamingRequest(
@@ -142,7 +154,8 @@ export function createMessagesHandler(config: AdapterConfig) {
             reply,
             anthropicRequest.model,
             config.baseUrl,
-            log
+            log,
+            customHeaders
           );
         }
       } else {
@@ -152,7 +165,8 @@ export function createMessagesHandler(config: AdapterConfig) {
           reply,
           anthropicRequest.model,
           config.baseUrl,
-          log
+          log,
+          customHeaders
         );
       }
 
@@ -197,13 +211,15 @@ async function handleNonStreamingRequest(
   reply: FastifyReply,
   originalModel: string,
   provider: string,
-  log: RequestLogger
+  log: RequestLogger,
+  customHeaders: Record<string, string>
 ): Promise<void> {
   log.debug('Making non-streaming request');
 
   const response = await openai.chat.completions.create({
     ...openaiRequest,
     stream: false,
+    ...(Object.keys(customHeaders).length > 0 && { headers: customHeaders }),
   });
 
   log.debug('Response received', {
@@ -243,15 +259,15 @@ async function handleStreamingRequest(
   reply: FastifyReply,
   originalModel: string,
   provider: string,
-  log: RequestLogger
+  log: RequestLogger,
+  customHeaders: Record<string, string>
 ): Promise<void> {
   log.debug('Making streaming request');
-
-  log.debug('=== OpenAI Stream Response Start ===', { model: originalModel, provider });
 
   const stream = await openai.chat.completions.create({
     ...openaiRequest,
     stream: true,
+    ...(Object.keys(customHeaders).length > 0 && { headers: customHeaders }),
   } as OpenAI.ChatCompletionCreateParamsStreaming);
 
   await streamOpenAIToAnthropic(stream as any, reply, originalModel, provider);
@@ -267,13 +283,15 @@ async function handleXmlStreamingRequest(
   reply: FastifyReply,
   originalModel: string,
   provider: string,
-  log: RequestLogger
+  log: RequestLogger,
+  customHeaders: Record<string, string>
 ): Promise<void> {
   log.debug('Making XML streaming request (experimental)');
 
   const stream = await openai.chat.completions.create({
     ...openaiRequest,
     stream: true,
+    ...(Object.keys(customHeaders).length > 0 && { headers: customHeaders }),
   } as OpenAI.ChatCompletionCreateParamsStreaming);
 
   await streamXmlOpenAIToAnthropic(stream as any, reply, originalModel, provider);
@@ -315,9 +333,11 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
+  const clientHeaders = buildClientHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
+    defaultHeaders: clientHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -344,10 +364,15 @@ export function createResponsesHandler(config: AdapterConfig) {
       }
 
       const anthropicRequest = request.body as AnthropicMessageRequest;
-      const targetModel = anthropicRequest.model;
       const isStreaming = anthropicRequest.stream ?? false;
 
-      log.info(`→ ${targetModel} [Responses API]`);
+      const resolved = resolveTargetModel(config, anthropicRequest.model);
+      const targetModel = resolved.targetModel;
+
+      log.info(`→ ${targetModel} [Responses API]`, {
+        originalModel: resolved.originalModel,
+        resolvedFrom: resolved.resolvedFrom,
+      });
 
       const toolStyle = config.toolFormat || 'native';
       const responsesRequest = convertRequestToResponses(anthropicRequest, targetModel, toolStyle);
@@ -367,12 +392,15 @@ export function createResponsesHandler(config: AdapterConfig) {
               : item.content?.map((c: any) => c.text || c.image_url).join('\n') || '',
         }));
 
+      const customHeaders = buildCustomHeaders(config.headers, isStreaming);
+
       if (isStreaming) {
         const responseStream = (await openai.chat.completions.create({
           model: responsesRequest.model,
           messages: chatMessages as any,
           stream: true,
           stream_options: { include_usage: true },
+          ...(Object.keys(customHeaders).length > 0 && { headers: customHeaders }),
         })) as AsyncIterable<any>;
 
         await streamResponsesToAnthropic(responseStream, reply, targetModel, config.baseUrl);
@@ -392,6 +420,7 @@ export function createResponsesHandler(config: AdapterConfig) {
       const response = await openai.chat.completions.create({
         model: responsesRequest.model,
         messages: chatMessages as any,
+        ...(Object.keys(customHeaders).length > 0 && { headers: customHeaders }),
       });
 
       log.debug('Chat completion response received', {
