@@ -169,21 +169,6 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
 }
 
 function processBuffer(state: BufferedState, raw: any): void {
-  const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
-
-  const hasToolCode = cleanBuffer.includes('<tool_code');
-
-  if (hasToolCode) {
-    const selfClosingMatch = cleanBuffer.match(TOOL_CODE_SELF_CLOSING);
-    const normalMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
-    if (!selfClosingMatch && !normalMatch) {
-      logger.debug('Buffer has tool_code but no match', {
-        bufferLength: cleanBuffer.length,
-        preview: cleanBuffer.substring(0, 500),
-      });
-    }
-  }
-
   let iteration = 0;
   while (true) {
     iteration++;
@@ -196,6 +181,10 @@ function processBuffer(state: BufferedState, raw: any): void {
     }
 
     const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
+
+    if (handleConsecutiveToolCodeTags(cleanBuffer, state, raw)) {
+      continue;
+    }
 
     const selfClosingMatch = cleanBuffer.match(TOOL_CODE_SELF_CLOSING);
     const normalMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
@@ -277,6 +266,36 @@ function extractAttributes(tagString: string, toolName: string): string {
     }
   }
   return JSON.stringify(attrs);
+}
+
+function handleConsecutiveToolCodeTags(
+  cleanBuffer: string,
+  state: BufferedState,
+  raw: any
+): boolean {
+  const toolCodeRegex = /<\s*tool_code/gi;
+  const matches = cleanBuffer.match(toolCodeRegex);
+
+  if (!matches || matches.length < 2) return false;
+
+  const firstIdx = cleanBuffer.search(toolCodeRegex);
+  const secondIdx = cleanBuffer.substring(firstIdx + matches[0].length).search(toolCodeRegex);
+
+  if (secondIdx === -1) return false;
+
+  const beforeFirst = cleanBuffer.substring(0, firstIdx);
+  if (beforeFirst.trim().length > 0) {
+    emitTextBlock(beforeFirst.trim(), state, raw);
+  }
+
+  const totalSkip = firstIdx + matches[0].length + secondIdx;
+  state.buffer = state.buffer.substring(totalSkip);
+
+  logger.debug('Handled consecutive tool_code with flexible spaces', {
+    firstTag: matches[0],
+    secondTag: matches[1],
+  });
+  return true;
 }
 
 function flushRemainingContent(state: BufferedState, raw: any): void {
