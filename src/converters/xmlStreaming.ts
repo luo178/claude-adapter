@@ -273,27 +273,39 @@ function handleConsecutiveToolCodeTags(
   state: BufferedState,
   raw: any
 ): boolean {
-  const toolCodeRegex = /<\s*tool_code/gi;
+  const toolCodeRegex = /<\s*tool_code[\s>]/gi;
   const matches = cleanBuffer.match(toolCodeRegex);
 
   if (!matches || matches.length < 2) return false;
 
   const firstIdx = cleanBuffer.search(toolCodeRegex);
-  const secondIdx = cleanBuffer.substring(firstIdx + matches[0].length).search(toolCodeRegex);
-
-  if (secondIdx === -1) return false;
+  if (firstIdx === -1) return false;
 
   const beforeFirst = cleanBuffer.substring(0, firstIdx);
   if (beforeFirst.trim().length > 0) {
     emitTextBlock(beforeFirst.trim(), state, raw);
   }
 
-  const totalSkip = firstIdx + matches[0].length + secondIdx;
+  let remaining = cleanBuffer.substring(firstIdx);
+  let totalSkip = firstIdx;
+  let removed = 0;
+
+  while (true) {
+    const nextIdx = remaining.search(toolCodeRegex);
+    if (nextIdx === -1) break;
+
+    const match = remaining.match(toolCodeRegex);
+    removed++;
+    totalSkip += nextIdx + (match ? match[0].length : 0);
+    remaining = remaining.substring(nextIdx + (match ? match[0].length : 0));
+
+    if (removed >= matches.length) break;
+  }
+
   state.buffer = state.buffer.substring(totalSkip);
 
-  logger.debug('Handled consecutive tool_code with flexible spaces', {
-    firstTag: matches[0],
-    secondTag: matches[1],
+  logger.debug('Handled multiple consecutive tool_code tags', {
+    count: removed,
   });
   return true;
 }
