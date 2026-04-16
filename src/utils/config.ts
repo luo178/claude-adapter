@@ -73,6 +73,15 @@ export function updateClaudeJson(): void {
   fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(claudeJson, null, 2), 'utf-8');
 }
 
+const MANAGED_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL',
+  'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_HAIKU_MODEL',
+];
+
 /**
  * Update ~/.claude/settings.json with proxy environment variables
  */
@@ -80,7 +89,6 @@ export function updateClaudeSettings(
   proxyUrl: string,
   models: { opus: string; sonnet: string; haiku: string; default?: string }
 ): void {
-  // Ensure directory exists
   if (!fs.existsSync(CLAUDE_SETTINGS_DIR)) {
     fs.mkdirSync(CLAUDE_SETTINGS_DIR, { recursive: true });
   }
@@ -93,26 +101,33 @@ export function updateClaudeSettings(
       settings = JSON.parse(content);
     }
   } catch {
-    // Start fresh if file is corrupted
     settings = {};
   }
 
-  const envSettings: Record<string, string> = {
-    ANTHROPIC_BASE_URL: proxyUrl,
-    ANTHROPIC_AUTH_TOKEN: 'default',
-    ANTHROPIC_DEFAULT_OPUS_MODEL: models.opus,
-    ANTHROPIC_DEFAULT_SONNET_MODEL: models.sonnet,
-    ANTHROPIC_DEFAULT_HAIKU_MODEL: models.haiku,
-  };
+  const existingEnv = settings.env || {};
+  const newEnv: Record<string, string> = {};
 
-  if (models.default) {
-    envSettings.ANTHROPIC_MODEL = models.default;
-  }
+  MANAGED_ENV_KEYS.forEach((key) => {
+    if (key === 'ANTHROPIC_BASE_URL') {
+      newEnv[key] = proxyUrl;
+    } else if (key === 'ANTHROPIC_AUTH_TOKEN') {
+      newEnv[key] = 'default';
+    } else if (key === 'ANTHROPIC_MODEL') {
+      if (models.default) {
+        newEnv[key] = models.default;
+      } else {
+        delete newEnv[key];
+      }
+    } else if (key === 'ANTHROPIC_DEFAULT_OPUS_MODEL') {
+      newEnv[key] = models.opus;
+    } else if (key === 'ANTHROPIC_DEFAULT_SONNET_MODEL') {
+      newEnv[key] = models.sonnet;
+    } else if (key === 'ANTHROPIC_DEFAULT_HAIKU_MODEL') {
+      newEnv[key] = models.haiku;
+    }
+  });
 
-  settings.env = {
-    ...(settings.env || {}),
-    ...envSettings,
-  };
+  settings.env = { ...existingEnv, ...newEnv };
 
   fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
 }
