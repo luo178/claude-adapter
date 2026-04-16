@@ -52,8 +52,9 @@ program
       let config = loadConfig();
 
       if (!config || options.reconfigure) {
-        UI.log(''); // Spacing
-        config = await promptForConfiguration();
+        UI.log('');
+        const existingConfig = options.reconfigure ? config : null;
+        config = await promptForConfiguration(existingConfig);
         saveConfig(config);
         console.log(
           `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat?.toUpperCase() || 'NATIVE'}]`)}`
@@ -129,7 +130,9 @@ program
 /**
  * Prompt user for configuration
  */
-async function promptForConfiguration(): Promise<AdapterConfig> {
+async function promptForConfiguration(
+  existingConfig?: AdapterConfig | null
+): Promise<AdapterConfig> {
   const prefix = UI.dim('?');
 
   // Required configuration prompts
@@ -139,7 +142,7 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       name: 'baseUrl',
       prefix,
       message: 'OpenAI-compatible base URL:',
-      default: 'https://api.openai.com/v1',
+      default: existingConfig?.baseUrl || 'https://api.openai.com/v1',
       transformer: (input: string) => UI.highlight(input),
       validate: (input: string) => {
         try {
@@ -169,6 +172,7 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       name: 'opusModel',
       prefix,
       message: 'Alternative model for Opus:',
+      default: existingConfig?.models?.opus,
       transformer: (input: string) => UI.highlight(input),
       validate: (input: string) => {
         if (!input || input.trim() === '') {
@@ -188,14 +192,20 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       name: 'sonnetModel',
       prefix,
       message: 'Alternative model for Sonnet:',
+      default: existingConfig?.models?.sonnet,
       transformer: (input: string) => (input ? UI.highlight(input) : ''),
     },
   ]);
 
-  const sonnetModel = sonnetAnswer.sonnetModel.trim() || opusModel;
+  const sonnetModel =
+    sonnetAnswer.sonnetModel.trim() || existingConfig?.models?.sonnet || opusModel;
 
-  // If skipped, replace blank line with fallback display
-  if (!sonnetAnswer.sonnetModel.trim()) {
+  if (!sonnetAnswer.sonnetModel.trim() && existingConfig?.models?.sonnet) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(
+      `${prefix} Alternative model for Sonnet: ${UI.dim(`[${existingConfig.models.sonnet}]`)}`
+    );
+  } else if (!sonnetAnswer.sonnetModel.trim()) {
     process.stdout.write('\x1b[1A\x1b[2K');
     console.log(`${prefix} Alternative model for Sonnet: ${UI.dim(`[${opusModel}]`)}`);
   }
@@ -207,14 +217,19 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       name: 'haikuModel',
       prefix,
       message: 'Alternative model for Haiku:',
+      default: existingConfig?.models?.haiku,
       transformer: (input: string) => (input ? UI.highlight(input) : ''),
     },
   ]);
 
-  const haikuModel = haikuAnswer.haikuModel.trim() || sonnetModel;
+  const haikuModel = haikuAnswer.haikuModel.trim() || existingConfig?.models?.haiku || sonnetModel;
 
-  // If skipped, replace blank line with fallback display
-  if (!haikuAnswer.haikuModel.trim()) {
+  if (!haikuAnswer.haikuModel.trim() && existingConfig?.models?.haiku) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(
+      `${prefix} Alternative model for Haiku: ${UI.dim(`[${existingConfig.models.haiku}]`)}`
+    );
+  } else if (!haikuAnswer.haikuModel.trim()) {
     process.stdout.write('\x1b[1A\x1b[2K');
     console.log(`${prefix} Alternative model for Haiku: ${UI.dim(`[${sonnetModel}]`)}`);
   }
@@ -226,13 +241,18 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
       name: 'defaultModel',
       prefix,
       message: 'Default model (for ANTHROPIC_MODEL env):',
+      default: existingConfig?.models?.default,
       transformer: (input: string) => (input ? UI.highlight(input) : ''),
     },
   ]);
 
-  const defaultModel = defaultModelAnswer.defaultModel.trim() || '';
+  const defaultModel =
+    defaultModelAnswer.defaultModel.trim() || existingConfig?.models?.default || '';
 
-  if (!defaultModelAnswer.defaultModel.trim()) {
+  if (!defaultModelAnswer.defaultModel.trim() && existingConfig?.models?.default) {
+    process.stdout.write('\x1b[1A\x1b[2K');
+    console.log(`${prefix} Default model: ${UI.dim(`[${existingConfig.models.default}]`)}`);
+  } else if (!defaultModelAnswer.defaultModel.trim()) {
     process.stdout.write('\x1b[1A\x1b[2K');
     console.log(`${prefix} Default model: ${UI.dim('[none]')}`);
   }
@@ -277,28 +297,33 @@ async function promptForConfiguration(): Promise<AdapterConfig> {
   }
 
   // Header 配置提示
+  const hasExistingHeaders = !!(existingConfig?.headers && existingConfig.headers.length > 0);
+
   const headerAnswer = await inquirer.prompt([
     {
       type: 'confirm',
       name: 'addHeaders',
       prefix,
       message: 'Add OpenCode headers (x-opencode-*)?',
-      default: false,
+      default: hasExistingHeaders,
     },
   ]);
 
   let headers;
   if (headerAnswer.addHeaders) {
+    const existingProjectName =
+      existingConfig?.headers?.find((h) => h.name === 'x-opencode-project')?.value || 'my-project';
+
     const projectNameAnswer = await inquirer.prompt([
       {
         type: 'input',
         name: 'projectName',
         prefix,
         message: 'Project name:',
-        default: 'my-project',
+        default: existingProjectName,
       },
     ]);
-    const projectName = projectNameAnswer.projectName.trim() || 'my-project';
+    const projectName = projectNameAnswer.projectName.trim() || existingProjectName;
     headers = [
       { name: 'x-opencode-project', value: projectName },
       { name: 'x-opencode-client', value: 'claude-adapter' },
