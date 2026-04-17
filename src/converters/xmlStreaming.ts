@@ -26,9 +26,6 @@ interface BufferedState {
 }
 
 const THINK_BLOCK_PATTERN = /<think>[\s\S]*?<\/think>/g;
-const TOOL_CODE_PATTERN =
-  /\s*<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*>([\s\S]*?)<\/\s*tool_code\s*>/i;
-const TOOL_CODE_SELF_CLOSING = /\s*<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)\s*\/>/i;
 const NESTED_TOOL_PATTERN = /<tool\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)">\s*/g;
 const CLOSE_TOOL_PATTERN = /<\/tool>\s*/g;
 
@@ -104,7 +101,7 @@ export async function streamXmlOpenAIToAnthropic(
         hasContent: !!choice.delta?.content,
         content: text.substring(0, 300),
         finishReason: choice.finish_reason,
-        hasToolCode: text.includes('<tool_code'),
+        hasToolCode: /<\s*tool_code/i.test(text),
         toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
           id: tc.id,
           name: tc.function?.name,
@@ -184,7 +181,7 @@ function processBuffer(state: BufferedState, raw: any): void {
 
     const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
-    const openIndex = cleanBuffer.indexOf('<tool_code');
+    const openIndex = cleanBuffer.search(/<\s*tool_code\s/i);
     if (openIndex === -1) {
       if (cleanBuffer.trim()) {
         emitTextBlock(cleanBuffer.trim(), state, raw);
@@ -198,9 +195,11 @@ function processBuffer(state: BufferedState, raw: any): void {
       emitTextBlock(textBeforeTool, state, raw);
     }
 
-    const closeIndex = cleanBuffer.indexOf('</tool_code>');
+    const closeIndex = cleanBuffer.search(/<\/\s*tool_code\s*>/i);
     if (closeIndex === -1) {
-      const nameMatch = cleanBuffer.match(/<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
+      const nameMatch = cleanBuffer
+        .substring(openIndex)
+        .match(/<\s*tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
       if (nameMatch) {
         let toolName = nameMatch[1];
         if (toolName.startsWith('"') && toolName.endsWith('"')) {
@@ -210,8 +209,9 @@ function processBuffer(state: BufferedState, raw: any): void {
         }
         emitToolUseStart(toolName, state, raw);
 
-        const tagEndIndex = cleanBuffer.indexOf('>');
-        const argsAfterTag = cleanBuffer.substring(tagEndIndex + 1);
+        const tagEndMatch = cleanBuffer.substring(openIndex).search(/>\s*$/m);
+        const tagEndIndex = tagEndMatch !== -1 ? openIndex + tagEndMatch : -1;
+        const argsAfterTag = tagEndIndex !== -1 ? cleanBuffer.substring(tagEndIndex + 1) : '';
         if (argsAfterTag.trim()) {
           emitToolUseDelta(argsAfterTag.trim(), state, raw);
         }
@@ -223,12 +223,14 @@ function processBuffer(state: BufferedState, raw: any): void {
 
     const toolBlock = cleanBuffer.substring(openIndex, closeIndex);
 
-    const nameMatch = toolBlock.match(/<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
+    const nameMatch = toolBlock.match(/<\s*tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
     if (!nameMatch) {
       logger.warn('Missing tool name in tool_code block', {
         content: toolBlock.substring(0, 100),
       });
-      state.buffer = state.buffer.substring(closeIndex + '</tool_code>'.length);
+      const closeMatch = cleanBuffer.substring(closeIndex).match(/<\/\s*tool_code\s*>/i);
+      const closeLen = closeMatch ? closeMatch[0].length : '</tool_code>'.length;
+      state.buffer = state.buffer.substring(closeIndex + closeLen);
       continue;
     }
 
@@ -250,7 +252,9 @@ function processBuffer(state: BufferedState, raw: any): void {
 
     emitToolUseStop(state, raw);
 
-    state.buffer = state.buffer.substring(closeIndex + '</tool_code>'.length);
+    const closeMatch = cleanBuffer.substring(closeIndex).match(/<\/\s*tool_code\s*>/i);
+    const closeLen = closeMatch ? closeMatch[0].length : '</tool_code>'.length;
+    state.buffer = state.buffer.substring(closeIndex + closeLen);
   }
 }
 
