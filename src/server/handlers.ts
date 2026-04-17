@@ -52,6 +52,7 @@ export function createMessagesHandler(config: AdapterConfig) {
 
     log.debug('=== Request Info ===', {
       requestId,
+      sessionId,
       method: request.method,
       url: request.url,
       headers: request.headers,
@@ -339,6 +340,11 @@ export function createResponsesHandler(config: AdapterConfig) {
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const requestId = generateRequestId();
+    const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
+    const customHeaders = buildHeaders(config.headers, {
+      outputHeader: config.session?.outputHeader,
+      sessionId,
+    });
     const log = logger.withRequestId(requestId);
     const startTime = Date.now();
 
@@ -346,6 +352,7 @@ export function createResponsesHandler(config: AdapterConfig) {
 
     log.debug('=== Responses API Request ===', {
       requestId,
+      sessionId,
       method: request.method,
       url: request.url,
       headers: request.headers,
