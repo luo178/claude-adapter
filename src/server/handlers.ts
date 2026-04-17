@@ -15,8 +15,9 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
-import { buildSessionHeaders, buildCustomHeaders } from './headers';
+import { buildHeaders, buildDefaultHeaders, getSessionId } from './headers';
 import { resolveTargetModel } from './modelResolver';
+import { randomUUID } from 'crypto';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
@@ -32,15 +33,23 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-  const clientHeaders = buildSessionHeaders(config.headers, false);
+  const staticHeaders = buildHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    defaultHeaders: clientHeaders,
+    defaultHeaders: staticHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const requestId = generateRequestId();
+
+    const clientSessionId = getSessionId(request.headers as Record<string, string>, config.session);
+    const sessionId = clientSessionId || randomUUID();
+
+    const customHeaders = buildHeaders(config.headers, {
+      outputHeader: config.session?.outputHeader,
+      sessionId,
+    });
     const log = logger.withRequestId(requestId);
     const startTime = Date.now();
 
@@ -125,8 +134,6 @@ export function createMessagesHandler(config: AdapterConfig) {
       if (toolStyle === 'xml' && anthropicRequest.tools?.length) {
         log.info(`Using XML tool calling mode (${anthropicRequest.tools.length} tools)`);
       }
-
-      const customHeaders = buildCustomHeaders(config.headers, isStreaming);
 
       if (isStreaming || (toolStyle === 'xml' && anthropicRequest.tools?.length)) {
         log.debug('=== OpenAI API Call ===', {
@@ -333,11 +340,11 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
-  const clientHeaders = buildSessionHeaders(config.headers, false);
+  const staticHeaders = buildHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    defaultHeaders: clientHeaders,
+    defaultHeaders: staticHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -392,7 +399,13 @@ export function createResponsesHandler(config: AdapterConfig) {
               : item.content?.map((c: any) => c.text || c.image_url).join('\n') || '',
         }));
 
-      const customHeaders = buildCustomHeaders(config.headers, isStreaming);
+      const clientSessionId = getSessionId(request.headers as Record<string, string>, config.session);
+      const sessionId = clientSessionId || randomUUID();
+
+      const customHeaders = buildHeaders(config.headers, {
+        outputHeader: config.session?.outputHeader,
+        sessionId,
+      });
 
       if (isStreaming) {
         const responseStream = (await openai.chat.completions.create({

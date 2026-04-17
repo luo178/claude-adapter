@@ -1,79 +1,57 @@
-import { CustomHeader } from '../types/config';
+import { AdapterConfig, CustomHeader } from '../types/config';
 
-export function buildStaticHeaders(headers?: CustomHeader[]): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
-
-  const result: Record<string, string> = {};
-
-  for (const header of headers) {
-    if (header.value) {
-      result[header.name] = header.value;
-    }
-  }
-
-  return result;
-}
-
-export function buildSessionHeaders(
+export function buildHeaders(
   headers?: CustomHeader[],
-  isStreaming?: boolean
+  sessionConfig?: { outputHeader?: string; sessionId?: string }
 ): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
-
   const result: Record<string, string> = {};
 
-  for (const header of headers) {
-    if (header.value) {
-      result[header.name] = header.value;
-    }
-
-    if (header.generator) {
-      if (isStreaming !== undefined) {
-        if (isStreaming && !header.includeForStreaming) {
-          continue;
-        }
-        if (!isStreaming && !header.includeForNonStreaming) {
-          continue;
-        }
+  if (headers) {
+    for (const header of headers) {
+      if (header.generator) {
+        const generatorFn = new Function(`return ${header.generator}`)();
+        result[header.name] = generatorFn();
+      } else if (header.value) {
+        result[header.name] = header.value;
       }
-
-      const generatorFn = new Function(`return ${header.generator}`)();
-      result[header.name] = generatorFn();
     }
+  }
+
+  if (sessionConfig?.sessionId && sessionConfig?.outputHeader) {
+    result[sessionConfig.outputHeader] = sessionConfig.sessionId;
   }
 
   return result;
 }
 
-export function buildCustomHeaders(
-  headers?: CustomHeader[],
-  isStreaming?: boolean
-): Record<string, string> {
-  if (!headers) {
-    return {};
+export function buildDefaultHeaders(config: AdapterConfig): Record<string, string> {
+  return buildHeaders(config.headers);
+}
+
+export function getSessionId(
+  requestHeaders: Record<string, string>,
+  sessionConfig?: { inputHeader?: string }
+): string {
+  const inputHeader = sessionConfig?.inputHeader;
+  if (inputHeader) {
+    const clientSessionId = requestHeaders[inputHeader];
+    if (clientSessionId && typeof clientSessionId === 'string' && clientSessionId.length > 0) {
+      return clientSessionId;
+    }
   }
 
-  const customHeaders: Record<string, string> = {};
-
-  for (const header of headers) {
-    if (!header.generator) {
-      continue;
+  const possibleSessionHeaders = [
+    'x-claude-code-session-id',
+    'x-opencode-session',
+    'x-session-id',
+    'x-session',
+  ];
+  for (const headerName of possibleSessionHeaders) {
+    const value = requestHeaders[headerName];
+    if (typeof value === 'string' && value.length > 0) {
+      return value;
     }
-
-    if (isStreaming && !header.includeForStreaming) {
-      continue;
-    }
-    if (!isStreaming && !header.includeForNonStreaming) {
-      continue;
-    }
-
-    const generatorFn = new Function(`return ${header.generator}`)();
-    customHeaders[header.name] = generatorFn();
   }
 
-  return customHeaders;
+  return '';
 }

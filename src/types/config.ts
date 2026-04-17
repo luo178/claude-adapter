@@ -4,8 +4,11 @@ export interface CustomHeader {
   name: string;
   value?: string;
   generator?: string;
-  includeForNonStreaming?: boolean;
-  includeForStreaming?: boolean;
+}
+
+export interface SessionConfig {
+  inputHeader?: string;
+  outputHeader?: string;
 }
 
 export interface AdapterConfig {
@@ -16,6 +19,7 @@ export interface AdapterConfig {
   port?: number;
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
   headers?: CustomHeader[];
+  session?: SessionConfig;
 }
 
 export interface ModelConfig {

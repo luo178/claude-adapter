@@ -361,8 +361,6 @@ async function promptForConfiguration(
       {
         name: 'x-opencode-session',
         generator: '() => crypto.randomUUID()',
-        includeForNonStreaming: true,
-        includeForStreaming: true,
       },
     ];
     console.log(`\x1b[32m✔\x1b[0m Headers: ${UI.dim('[x-opencode-project, x-opencode-session]')}`);
