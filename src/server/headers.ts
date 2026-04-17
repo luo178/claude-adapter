@@ -6,9 +6,13 @@ export function buildHeaders(
   sessionConfig?: { outputHeader?: string; sessionId?: string }
 ): Record<string, string> {
   const result: Record<string, string> = {};
+  const outputHeader = sessionConfig?.outputHeader;
 
   if (headers) {
     for (const header of headers) {
+      if (outputHeader && header.name === outputHeader) {
+        continue;
+      }
       if (header.generator) {
         const generatorFn = new Function(`return ${header.generator}`)();
         result[header.name] = generatorFn();
@@ -18,8 +22,8 @@ export function buildHeaders(
     }
   }
 
-  if (sessionConfig?.sessionId && sessionConfig?.outputHeader) {
-    result[sessionConfig.outputHeader] = sessionConfig.sessionId;
+  if (sessionConfig?.sessionId && outputHeader) {
+    result[outputHeader] = sessionConfig.sessionId;
   }
 
   return result;
@@ -33,9 +37,8 @@ export function getSessionId(
   requestHeaders: Record<string, string>,
   sessionConfig?: { inputHeader?: string }
 ): string {
-  const inputHeader = sessionConfig?.inputHeader;
-  if (inputHeader) {
-    const clientSessionId = requestHeaders[inputHeader];
+  if (sessionConfig?.inputHeader) {
+    const clientSessionId = requestHeaders[sessionConfig.inputHeader];
     if (clientSessionId && typeof clientSessionId === 'string' && clientSessionId.length > 0) {
       return clientSessionId;
     }

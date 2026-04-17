@@ -358,13 +358,36 @@ async function promptForConfiguration(
     headers = [
       { name: 'x-opencode-project', value: projectName },
       { name: 'x-opencode-client', value: clientName },
-      {
-        name: 'x-opencode-session',
-        generator: '() => crypto.randomUUID()',
-      },
     ];
-    console.log(`\x1b[32m✔\x1b[0m Headers: ${UI.dim('[x-opencode-project, x-opencode-session]')}`);
+    console.log(`\x1b[32m✔\x1b[0m Headers: ${UI.dim('[x-opencode-project, x-opencode-client]')}`);
   }
+
+  const existingInputHeader = existingConfig?.session?.inputHeader || 'x-claude-code-session-id';
+  const existingOutputHeader = existingConfig?.session?.outputHeader || 'x-opencode-session';
+
+  const sessionHeaderAnswer = await inquirer.prompt([
+    {
+      type: 'input',
+      name: 'inputHeader',
+      prefix,
+      message: 'Session input header:',
+      default: existingInputHeader,
+    },
+    {
+      type: 'input',
+      name: 'outputHeader',
+      prefix,
+      message: 'Session output header:',
+      default: existingOutputHeader,
+    },
+  ]);
+
+  const sessionConfig = {
+    inputHeader: sessionHeaderAnswer.inputHeader.trim() || existingInputHeader,
+    outputHeader: sessionHeaderAnswer.outputHeader.trim() || existingOutputHeader,
+  };
+
+  console.log(`\x1b[32m✔\x1b[0m Session: ${UI.dim(`[${sessionConfig.inputHeader}, ${sessionConfig.outputHeader}]`)}`);
 
   return {
     baseUrl: baseUrlAnswer.baseUrl.trim(),
@@ -377,6 +400,7 @@ async function promptForConfiguration(
     },
     toolFormat,
     ...(headers && { headers }),
+    session: sessionConfig,
   };
 }
 
