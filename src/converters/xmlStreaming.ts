@@ -19,8 +19,10 @@ interface BufferedState {
   outputTokens: number;
   cachedInputTokens: number;
   hasStarted: boolean;
-  buffer: string; // Accumulates all text
-  toolCallsEmitted: number; // Count of tool calls emitted
+  buffer: string;
+  toolCallsEmitted: number;
+  currentToolId?: string;
+  currentToolName?: string;
 }
 
 const THINK_BLOCK_PATTERN = /<think>[\s\S]*?<\/think>/g;
@@ -182,132 +184,74 @@ function processBuffer(state: BufferedState, raw: any): void {
 
     const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
-    if (handleConsecutiveToolCodeTags(cleanBuffer, state, raw)) {
+    const openIndex = cleanBuffer.indexOf('<tool_code');
+    if (openIndex === -1) {
+      if (cleanBuffer.trim()) {
+        emitTextBlock(cleanBuffer.trim(), state, raw);
+        state.buffer = '';
+      }
+      break;
+    }
+
+    const textBeforeTool = cleanBuffer.substring(0, openIndex).trim();
+    if (textBeforeTool) {
+      emitTextBlock(textBeforeTool, state, raw);
+    }
+
+    const closeIndex = cleanBuffer.indexOf('</tool_code>');
+    if (closeIndex === -1) {
+      const nameMatch = cleanBuffer.match(/<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
+      if (nameMatch) {
+        let toolName = nameMatch[1];
+        if (toolName.startsWith('"') && toolName.endsWith('"')) {
+          toolName = toolName.slice(1, -1);
+        } else if (toolName.startsWith("'") && toolName.endsWith("'")) {
+          toolName = toolName.slice(1, -1);
+        }
+        emitToolUseStart(toolName, state, raw);
+
+        const tagEndIndex = cleanBuffer.indexOf('>');
+        const argsAfterTag = cleanBuffer.substring(tagEndIndex + 1);
+        if (argsAfterTag.trim()) {
+          emitToolUseDelta(argsAfterTag.trim(), state, raw);
+        }
+
+        state.buffer = '';
+      }
+      break;
+    }
+
+    const toolBlock = cleanBuffer.substring(openIndex, closeIndex);
+
+    const nameMatch = toolBlock.match(/<tool_code\s+name\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i);
+    if (!nameMatch) {
+      logger.warn('Missing tool name in tool_code block', {
+        content: toolBlock.substring(0, 100),
+      });
+      state.buffer = state.buffer.substring(closeIndex + '</tool_code>'.length);
       continue;
     }
 
-    const selfClosingMatch = cleanBuffer.match(TOOL_CODE_SELF_CLOSING);
-    const normalMatch = cleanBuffer.match(TOOL_CODE_PATTERN);
-
-    let toolMatch: RegExpMatchArray | null = null;
-    let isSelfClosing = false;
-
-    if (selfClosingMatch && normalMatch) {
-      if (cleanBuffer.indexOf(selfClosingMatch[0]) < cleanBuffer.indexOf(normalMatch[0])) {
-        toolMatch = selfClosingMatch;
-        isSelfClosing = true;
-      } else {
-        toolMatch = normalMatch;
-      }
-    } else if (selfClosingMatch) {
-      toolMatch = selfClosingMatch;
-      isSelfClosing = true;
-    } else if (normalMatch) {
-      toolMatch = normalMatch;
-    }
-
-    if (!toolMatch) break;
-
-    let toolName = toolMatch[1];
+    let toolName = nameMatch[1];
     if (toolName.startsWith('"') && toolName.endsWith('"')) {
       toolName = toolName.slice(1, -1);
     } else if (toolName.startsWith("'") && toolName.endsWith("'")) {
       toolName = toolName.slice(1, -1);
     }
 
-    let rawArgs = '';
-    let fullMatch = '';
+    emitToolUseStart(toolName, state, raw);
 
-    if (isSelfClosing) {
-      rawArgs = extractAttributes(toolMatch[0], toolName);
-      fullMatch = toolMatch[0];
-    } else {
-      rawArgs = toolMatch[2];
-      fullMatch = toolMatch[0];
+    const tagEndIndex = toolBlock.indexOf('>');
+    const rawArgs = toolBlock.substring(tagEndIndex + 1).trim();
+    if (rawArgs) {
+      const cleanArgs = cleanToolArgs(rawArgs);
+      emitToolUseDelta(cleanArgs, state, raw);
     }
 
-    const matchStart = cleanBuffer.indexOf(fullMatch);
-    const textBeforeTool = cleanBuffer.substring(0, matchStart);
-    const cleanText = textBeforeTool.trim();
+    emitToolUseStop(state, raw);
 
-    if (cleanText.length > 0) {
-      emitTextBlock(cleanText, state, raw);
-    }
-
-    const cleanArgs = cleanToolArgs(rawArgs);
-    emitToolUseBlock(toolName, cleanArgs, state, raw);
-
-    const endTagMatch = isSelfClosing ? null : state.buffer.match(/\s*<\/tool_code\s*>/i);
-    if (endTagMatch) {
-      const originalMatchEnd = state.buffer.indexOf(endTagMatch[0]) + endTagMatch[0].length;
-      state.buffer = state.buffer.substring(originalMatchEnd);
-    } else if (isSelfClosing) {
-      const matchEnd = state.buffer.indexOf(fullMatch) + fullMatch.length;
-      state.buffer = state.buffer.substring(matchEnd);
-    }
+    state.buffer = state.buffer.substring(closeIndex + '</tool_code>'.length);
   }
-}
-
-function extractAttributes(tagString: string, toolName: string): string {
-  const attrs: Record<string, string> = {};
-  const attrRegex = /(\w+)\s*=\s*("[^"]*"|'[^']*'|[^\s/>]+)/g;
-  let match;
-  while ((match = attrRegex.exec(tagString)) !== null) {
-    const key = match[1];
-    const value = match[2];
-    if (key !== 'name') {
-      let cleanValue = value;
-      if (cleanValue.startsWith('"') && cleanValue.endsWith('"')) {
-        cleanValue = cleanValue.slice(1, -1);
-      } else if (cleanValue.startsWith("'") && cleanValue.endsWith("'")) {
-        cleanValue = cleanValue.slice(1, -1);
-      }
-      attrs[key] = cleanValue;
-    }
-  }
-  return JSON.stringify(attrs);
-}
-
-function handleConsecutiveToolCodeTags(
-  cleanBuffer: string,
-  state: BufferedState,
-  raw: any
-): boolean {
-  const toolCodeRegex = /<\s*tool_code\s*>/gi;
-  const matches = cleanBuffer.match(toolCodeRegex);
-
-  if (!matches || matches.length < 2) return false;
-
-  const firstIdx = cleanBuffer.search(toolCodeRegex);
-  if (firstIdx === -1) return false;
-
-  const beforeFirst = cleanBuffer.substring(0, firstIdx);
-  if (beforeFirst.trim().length > 0) {
-    emitTextBlock(beforeFirst.trim(), state, raw);
-  }
-
-  let remaining = cleanBuffer.substring(firstIdx);
-  let totalSkip = firstIdx;
-  let removed = 0;
-
-  while (true) {
-    const nextIdx = remaining.search(toolCodeRegex);
-    if (nextIdx === -1) break;
-
-    const match = remaining.match(toolCodeRegex);
-    removed++;
-    totalSkip += nextIdx + (match ? match[0].length : 0);
-    remaining = remaining.substring(nextIdx + (match ? match[0].length : 0));
-
-    if (removed >= matches.length) break;
-  }
-
-  state.buffer = state.buffer.substring(totalSkip);
-
-  logger.debug('Handled multiple consecutive tool_code tags', {
-    count: removed,
-  });
-  return true;
 }
 
 function flushRemainingContent(state: BufferedState, raw: any): void {
@@ -367,6 +311,64 @@ function emitTextBlock(text: string, state: BufferedState, raw: any): void {
   sendSSE(stopEvent, raw);
 
   state.contentBlockIndex++;
+}
+
+function emitToolUseStart(toolName: string, state: BufferedState, raw: any): void {
+  const toolId = generateToolUseId();
+  state.currentToolId = toolId;
+  state.currentToolName = toolName;
+
+  logger.debug('Emitting tool_use start', {
+    toolName,
+    toolId,
+    blockIndex: state.contentBlockIndex,
+  });
+
+  const event = {
+    type: 'content_block_start',
+    index: state.contentBlockIndex,
+    content_block: {
+      type: 'tool_use',
+      id: toolId,
+      name: toolName,
+      input: {},
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function emitToolUseDelta(args: string, state: BufferedState, raw: any): void {
+  if (!state.currentToolId) return;
+
+  const event = {
+    type: 'content_block_delta',
+    index: state.contentBlockIndex,
+    delta: {
+      type: 'input_json_delta',
+      partial_json: args,
+    },
+  };
+  sendSSE(event, raw);
+}
+
+function emitToolUseStop(state: BufferedState, raw: any): void {
+  if (!state.currentToolId) return;
+
+  const event = {
+    type: 'content_block_stop',
+    index: state.contentBlockIndex,
+  };
+  sendSSE(event, raw);
+
+  logger.debug('Emitting tool_use stop', {
+    toolName: state.currentToolName,
+    toolId: state.currentToolId,
+  });
+
+  state.contentBlockIndex++;
+  state.toolCallsEmitted++;
+  state.currentToolId = undefined;
+  state.currentToolName = undefined;
 }
 
 function emitToolUseBlock(toolName: string, args: string, state: BufferedState, raw: any): void {

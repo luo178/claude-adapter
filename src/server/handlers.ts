@@ -32,7 +32,7 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-  const clientHeaders = buildSessionHeaders(config.headers);
+  const clientHeaders = buildSessionHeaders(config.headers, false);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
@@ -333,7 +333,7 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
-  const clientHeaders = buildSessionHeaders(config.headers);
+  const clientHeaders = buildSessionHeaders(config.headers, false);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,

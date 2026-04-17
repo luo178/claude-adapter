@@ -16,7 +16,10 @@ export function buildStaticHeaders(headers?: CustomHeader[]): Record<string, str
   return result;
 }
 
-export function buildSessionHeaders(headers?: CustomHeader[]): Record<string, string> {
+export function buildSessionHeaders(
+  headers?: CustomHeader[],
+  isStreaming?: boolean
+): Record<string, string> {
   if (!headers) {
     return {};
   }
@@ -29,6 +32,15 @@ export function buildSessionHeaders(headers?: CustomHeader[]): Record<string, st
     }
 
     if (header.generator) {
+      if (isStreaming !== undefined) {
+        if (isStreaming && !header.includeForStreaming) {
+          continue;
+        }
+        if (!isStreaming && !header.includeForNonStreaming) {
+          continue;
+        }
+      }
+
       const generatorFn = new Function(`return ${header.generator}`)();
       result[header.name] = generatorFn();
     }
