@@ -102,6 +102,7 @@ export async function streamXmlOpenAIToAnthropic(
         content: text.substring(0, 300),
         finishReason: choice.finish_reason,
         hasToolCode: /<\s*tool_code/i.test(text),
+        hasDeltaToolCalls: !!choice.delta?.tool_calls?.length,
         toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
           id: tc.id,
           name: tc.function?.name,
