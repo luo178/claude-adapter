@@ -159,11 +159,13 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
 
   const textDelta = choice.delta?.content || (choice.delta as any)?.text || '';
   if (!textDelta) {
+    if (choice.delta?.tool_calls?.length) {
+      handleToolCalls(choice.delta.tool_calls, state, raw);
+    }
     return;
   }
 
   state.buffer += textDelta;
-  // Process buffer for complete tool calls
   processBuffer(state, raw);
 }
 
@@ -373,6 +375,16 @@ function emitToolUseStop(state: BufferedState, raw: any): void {
   state.toolCallsEmitted++;
   state.currentToolId = undefined;
   state.currentToolName = undefined;
+}
+
+function handleToolCalls(toolCalls: any[], state: BufferedState, raw: any): void {
+  for (const tc of toolCalls) {
+    const toolName = tc.function?.name;
+    const args = tc.function?.arguments || '';
+    if (toolName) {
+      emitToolUseBlock(toolName, args, state, raw);
+    }
+  }
 }
 
 function emitToolUseBlock(toolName: string, args: string, state: BufferedState, raw: any): void {
