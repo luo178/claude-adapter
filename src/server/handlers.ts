@@ -17,7 +17,6 @@ import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
 import { buildHeaders, buildDefaultHeaders, getSessionId } from './headers';
 import { resolveTargetModel } from './modelResolver';
-import { randomUUID } from 'crypto';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
@@ -33,19 +32,15 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-  const staticHeaders = buildHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    defaultHeaders: staticHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const requestId = generateRequestId();
 
-    const clientSessionId = getSessionId(request.headers as Record<string, string>, config.session);
-    const sessionId = clientSessionId || randomUUID();
-
+    const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
     const customHeaders = buildHeaders(config.headers, {
       outputHeader: config.session?.outputHeader,
       sessionId,
@@ -59,10 +54,7 @@ export function createMessagesHandler(config: AdapterConfig) {
       requestId,
       method: request.method,
       url: request.url,
-      headers: {
-        content_type: request.headers['content-type'],
-        authorization: request.headers['authorization'] ? '[set]' : '[none]',
-      },
+      headers: request.headers,
       remote: request.headers['x-forwarded-for'] || request.headers['remote-address'] || 'unknown',
     });
 
@@ -340,11 +332,9 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
-  const staticHeaders = buildHeaders(config.headers);
   const openai = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    defaultHeaders: staticHeaders,
   });
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -358,6 +348,7 @@ export function createResponsesHandler(config: AdapterConfig) {
       requestId,
       method: request.method,
       url: request.url,
+      headers: request.headers,
     });
 
     try {
@@ -399,9 +390,7 @@ export function createResponsesHandler(config: AdapterConfig) {
               : item.content?.map((c: any) => c.text || c.image_url).join('\n') || '',
         }));
 
-      const clientSessionId = getSessionId(request.headers as Record<string, string>, config.session);
-      const sessionId = clientSessionId || randomUUID();
-
+const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
       const customHeaders = buildHeaders(config.headers, {
         outputHeader: config.session?.outputHeader,
         sessionId,

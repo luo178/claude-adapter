@@ -1,4 +1,5 @@
 import { AdapterConfig, CustomHeader } from '../types/config';
+import { randomUUID } from 'crypto';
 
 export function buildHeaders(
   headers?: CustomHeader[],
@@ -53,5 +54,5 @@ export function getSessionId(
     }
   }
 
-  return '';
+  return randomUUID();
 }
