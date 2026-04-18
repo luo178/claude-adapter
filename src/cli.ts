@@ -57,7 +57,7 @@ program
         config = await promptForConfiguration(existingConfig);
         saveConfig(config);
         console.log(
-          `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat?.toUpperCase() || 'NATIVE'}]`)}`
+          `\x1b[2m✔\x1b[0m Tool Format: ${UI.dim(`[${config.toolFormat?.toUpperCase() || 'AUTO'}]`)}`
         );
         UI.info('Creating Claude Adapter API...');
       } else if (config.toolFormat === undefined) {
@@ -290,10 +290,9 @@ async function promptForConfiguration(
     },
   ]);
 
-  let toolFormat: 'native' | 'xml';
+  let toolFormat: 'auto' | 'native' | 'xml';
 
   if (toolSupportAnswer.supportsTools) {
-    // User selected "Yes" - ask for tool type
     const toolTypeAnswer = await inquirer.prompt([
       {
         type: 'list',
@@ -301,17 +300,17 @@ async function promptForConfiguration(
         prefix,
         message: 'Select tool/function type:',
         choices: [
-          { name: 'XML (Recommended)', value: 'xml' },
-          { name: 'Native (Openai Format)', value: 'native' },
+          { name: 'Auto (Recommended - auto-detect)', value: 'auto' },
+          { name: 'Native (OpenAI format)', value: 'native' },
+          { name: 'XML', value: 'xml' },
         ],
-        default: 'xml',
+        default: 'auto',
       },
     ]);
-    toolFormat = toolTypeAnswer.toolType as 'native' | 'xml';
+    toolFormat = toolTypeAnswer.toolType as 'auto' | 'native' | 'xml';
   } else {
-    // User selected "No" - auto-select xml
-    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
-    toolFormat = 'xml';
+    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[AUTO]')}`);
+    toolFormat = 'auto';
   }
 
   // Header 配置提示
@@ -407,7 +406,7 @@ async function promptForConfiguration(
 /**
  * Prompt only for tool calling style (for existing configs missing this field)
  */
-async function promptForToolCallingStyle(): Promise<'native' | 'xml'> {
+async function promptForToolCallingStyle(): Promise<'auto' | 'native' | 'xml'> {
   const prefix = UI.dim('?');
 
   const toolSupportAnswer = await inquirer.prompt([
@@ -425,7 +424,6 @@ async function promptForToolCallingStyle(): Promise<'native' | 'xml'> {
   ]);
 
   if (toolSupportAnswer.supportsTools) {
-    // User selected "Yes" - ask for tool type
     const toolTypeAnswer = await inquirer.prompt([
       {
         type: 'list',
@@ -433,17 +431,17 @@ async function promptForToolCallingStyle(): Promise<'native' | 'xml'> {
         prefix,
         message: 'Select tool/function type:',
         choices: [
-          { name: 'XML (Recommended)', value: 'xml' },
-          { name: 'Native (Openai Format)', value: 'native' },
+          { name: 'Auto (Recommended - auto-detect)', value: 'auto' },
+          { name: 'Native (OpenAI format)', value: 'native' },
+          { name: 'XML', value: 'xml' },
         ],
-        default: 'xml',
+        default: 'auto',
       },
     ]);
-    return toolTypeAnswer.toolType as 'native' | 'xml';
+    return toolTypeAnswer.toolType as 'auto' | 'native' | 'xml';
   } else {
-    // User selected "No" - auto-select xml
-    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[XML]')}`);
-    return 'xml';
+    console.log(`\x1b[32m✔\x1b[0m Tool Format: ${UI.dim('[AUTO]')}`);
+    return 'auto';
   }
 }
 

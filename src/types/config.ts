@@ -15,7 +15,7 @@ export interface AdapterConfig {
   baseUrl: string;
   apiKey: string;
   models: ModelConfig;
-  toolFormat?: 'native' | 'xml';
+  toolFormat?: 'auto' | 'native' | 'xml';
   port?: number;
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
   headers?: CustomHeader[];

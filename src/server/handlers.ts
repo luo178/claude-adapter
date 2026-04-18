@@ -17,9 +17,13 @@ import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
 import { buildHeaders, buildDefaultHeaders, getSessionId } from './headers';
 import { resolveTargetModel } from './modelResolver';
+import { ToolFormatDetector, createToolFormatDetector } from '../converters/toolFormatDetector';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
+
+// Track previous sessionId for header output optimization
+let previousSessionIdForHeaders = '';
 
 function generateRequestId(): string {
   requestIdCounter++;
@@ -37,6 +41,8 @@ export function createMessagesHandler(config: AdapterConfig) {
     apiKey: config.apiKey,
   });
 
+  const toolFormatDetector = createToolFormatDetector(config.baseUrl, config.apiKey);
+
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const requestId = generateRequestId();
 
@@ -50,12 +56,14 @@ export function createMessagesHandler(config: AdapterConfig) {
 
     reply.header('X-Request-Id', requestId);
 
+    const showHeaders = sessionId !== previousSessionIdForHeaders;
+    previousSessionIdForHeaders = sessionId;
     log.debug('=== Request Info ===', {
       requestId,
       sessionId,
       method: request.method,
       url: request.url,
-      headers: request.headers,
+      ...(showHeaders && { headers: request.headers }),
       remote: request.headers['x-forwarded-for'] || request.headers['remote-address'] || 'unknown',
     });
 
@@ -105,8 +113,9 @@ export function createMessagesHandler(config: AdapterConfig) {
         full: JSON.stringify(anthropicRequest).substring(0, 800),
       });
 
-      // Determine tool calling style from config
-      const toolStyle = config.toolFormat || 'native';
+      // Determine tool calling style from config or auto-detect
+      const toolStyle = toolFormatDetector.getToolFormat(targetModel, config.toolFormat);
+      log.debug('Tool format selected', { toolStyle, configured: config.toolFormat });
 
       // Convert request to OpenAI format
       const openaiRequest = convertRequestToOpenAI(anthropicRequest, targetModel, toolStyle);
@@ -123,9 +132,23 @@ export function createMessagesHandler(config: AdapterConfig) {
         tools: openaiRequest.tools?.map((t: any) => t.function?.name),
       });
 
-      // Log tool calling mode when tools are present
+      // Log tool calling mode and full tools for both native and xml
       if (toolStyle === 'xml' && anthropicRequest.tools?.length) {
         log.info(`Using XML tool calling mode (${anthropicRequest.tools.length} tools)`);
+      }
+
+      if (toolStyle === 'native' && openaiRequest.tools?.length) {
+        log.debug('=== Native Tools Definition ===', {
+          toolCount: openaiRequest.tools.length,
+          tools: openaiRequest.tools.map((t: any) => ({
+            type: t.type,
+            function: {
+              name: t.function?.name,
+              description: t.function?.description?.substring(0, 100),
+              parameters: t.function?.parameters,
+            },
+          })),
+        });
       }
 
       if (isStreaming || (toolStyle === 'xml' && anthropicRequest.tools?.length)) {
@@ -338,6 +361,8 @@ export function createResponsesHandler(config: AdapterConfig) {
     apiKey: config.apiKey,
   });
 
+  const toolFormatDetector = createToolFormatDetector(config.baseUrl, config.apiKey);
+
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const requestId = generateRequestId();
     const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
@@ -379,7 +404,7 @@ export function createResponsesHandler(config: AdapterConfig) {
         resolvedFrom: resolved.resolvedFrom,
       });
 
-      const toolStyle = config.toolFormat || 'native';
+      const toolStyle = toolFormatDetector.getToolFormat(targetModel, config.toolFormat);
       const responsesRequest = convertRequestToResponses(anthropicRequest, targetModel, toolStyle);
 
       log.debug('Responses request', {

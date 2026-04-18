@@ -102,7 +102,25 @@ export async function streamOpenAIToAnthropic(
   raw.setHeader('X-Accel-Buffering', 'no');
 
   try {
+    let chunkIndex = 0;
     for await (const chunk of openaiStream) {
+      const chunkLog: any = {
+        chunkIndex: chunkIndex++,
+        id: chunk.id,
+        model: chunk.model,
+      };
+
+      if (chunk.choices?.length) {
+        chunkLog.choices = chunk.choices.map((c: any) => ({
+          index: c.index,
+          finish_reason: c.finish_reason,
+          hasContent: !!c.delta?.content,
+          hasReasoning: !!c.delta?.reasoning?.content,
+          hasToolCalls: !!c.delta?.tool_calls?.length,
+        }));
+      }
+
+      logger.debug('=== Native OpenAI Stream Chunk ===', chunkLog);
       processChunk(chunk, state, raw);
     }
 
@@ -194,6 +212,11 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
 
   // Handle finish reason
   if (choice.finish_reason) {
+    logger.debug('=== Native Finish Reason ===', {
+      finish_reason: choice.finish_reason,
+      hasToolCalls: state.currentToolCalls.size > 0,
+    });
+
     // Close any open thinking block
     if (state.isThinkingBlock) {
       sendContentBlockStop(state.contentBlockIndex, raw);
@@ -262,6 +285,12 @@ function processToolCallDelta(
   if (toolCall.function?.arguments) {
     currentCall.arguments += toolCall.function.arguments;
     const blockIndex = state.contentBlockIndex + index;
+    logger.debug('=== Native Tool Call Delta ===', {
+      index,
+      toolId: currentCall.id,
+      toolName: currentCall.name,
+      partialArgs: toolCall.function.arguments?.substring(0, 100),
+    });
     sendInputJsonDelta(blockIndex, toolCall.function.arguments, raw);
   }
 }
