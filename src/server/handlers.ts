@@ -36,14 +36,14 @@ function generateRequestId(): string {
  * Handle POST /v1/messages requests
  */
 export function createMessagesHandler(config: AdapterConfig) {
-  const openai = new OpenAI({
-    baseURL: config.baseUrl,
-    apiKey: config.apiKey,
-  });
-
   const toolFormatDetector = createToolFormatDetector(config.baseUrl, config.apiKey);
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const openai = new OpenAI({
+      baseURL: config.baseUrl,
+      apiKey: config.apiKey,
+    });
+
     const requestId = generateRequestId();
 
     const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
@@ -356,14 +356,14 @@ function handleError(
  * Handle POST /v1/responses requests
  */
 export function createResponsesHandler(config: AdapterConfig) {
-  const openai = new OpenAI({
-    baseURL: config.baseUrl,
-    apiKey: config.apiKey,
-  });
-
   const toolFormatDetector = createToolFormatDetector(config.baseUrl, config.apiKey);
 
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const openai = new OpenAI({
+      baseURL: config.baseUrl,
+      apiKey: config.apiKey,
+    });
+
     const requestId = generateRequestId();
     const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
     const customHeaders = buildHeaders(config.headers, {
@@ -421,12 +421,6 @@ export function createResponsesHandler(config: AdapterConfig) {
               ? item.content
               : item.content?.map((c: any) => c.text || c.image_url).join('\n') || '',
         }));
-
-const sessionId = getSessionId(request.headers as Record<string, string>, config.session);
-      const customHeaders = buildHeaders(config.headers, {
-        outputHeader: config.session?.outputHeader,
-        sessionId,
-      });
 
       if (isStreaming) {
         const responseStream = (await openai.chat.completions.create({

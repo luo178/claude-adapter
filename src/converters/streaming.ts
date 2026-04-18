@@ -8,30 +8,17 @@ import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
 import { logger } from '../utils/logger';
 
-// Global counter and set for unique tool IDs within this process
-let toolIdCounter = 0;
-const usedToolIds = new Set<string>();
+// Tool ID generation for request isolation
 
-function generateUniqueToolId(): string {
+function generateUniqueToolId(usedIds: Set<string>): string {
   let id: string;
   do {
-    toolIdCounter++;
     const timestamp = Date.now().toString(36);
-    const counter = toolIdCounter.toString(36).padStart(4, '0');
     const random = Math.random().toString(36).substring(2, 10);
-    id = `call_${timestamp}_${counter}_${random}`;
-  } while (usedToolIds.has(id));
+    id = `call_${timestamp}_${random}`;
+  } while (usedIds.has(id));
 
-  usedToolIds.add(id);
-
-  // Clean up old IDs periodically to prevent memory leak (keep last 10000)
-  if (usedToolIds.size > 10000) {
-    const idsArray = Array.from(usedToolIds);
-    for (let i = 0; i < 5000; i++) {
-      usedToolIds.delete(idsArray[i]);
-    }
-  }
-
+  usedIds.add(id);
   return id;
 }
 
@@ -47,8 +34,11 @@ interface StreamingState {
       id: string;
       name: string;
       arguments: string;
+      blockIndex: number;
     }
   >;
+  activeBlockIndices: Set<number>;
+  closedBlockIndices: Set<number>;
   inputTokens: number;
   outputTokens: number;
   cachedInputTokens: number;
@@ -58,6 +48,7 @@ interface StreamingState {
   thinkingSignature: string;
   isThinkingBlock: boolean;
   hasTextContentStarted: boolean;
+  usedToolIds: Set<string>;
 }
 
 /**
@@ -76,6 +67,8 @@ export async function streamOpenAIToAnthropic(
     provider,
     contentBlockIndex: 0,
     currentToolCalls: new Map(),
+    activeBlockIndices: new Set(),
+    closedBlockIndices: new Set(),
     inputTokens: 0,
     outputTokens: 0,
     cachedInputTokens: 0,
@@ -85,6 +78,7 @@ export async function streamOpenAIToAnthropic(
     thinkingSignature: '',
     isThinkingBlock: false,
     hasTextContentStarted: false,
+    usedToolIds: new Set<string>(),
   };
 
   logger.debug('Streaming conversion started', {
@@ -183,7 +177,10 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
     if (delta.reasoning.signature) {
       state.thinkingSignature = delta.reasoning.signature;
       sendThinkingSignature(state.contentBlockIndex, delta.reasoning.signature, raw);
-      sendContentBlockStop(state.contentBlockIndex, raw);
+      if (!state.closedBlockIndices.has(state.contentBlockIndex)) {
+        sendContentBlockStop(state.contentBlockIndex, raw);
+        state.closedBlockIndices.add(state.contentBlockIndex);
+      }
       state.contentBlockIndex++;
       state.isThinkingBlock = false;
       state.thinkingContent = '';
@@ -193,8 +190,9 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
   // Handle text content
   if (delta.content) {
     // Close thinking block if open before starting text
-    if (state.isThinkingBlock) {
+    if (state.isThinkingBlock && !state.closedBlockIndices.has(state.contentBlockIndex)) {
       sendContentBlockStop(state.contentBlockIndex, raw);
+      state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
       state.isThinkingBlock = false;
       state.thinkingContent = '';
@@ -225,21 +223,26 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
     });
 
     // Close any open thinking block
-    if (state.isThinkingBlock) {
+    if (state.isThinkingBlock && !state.closedBlockIndices.has(state.contentBlockIndex)) {
       sendContentBlockStop(state.contentBlockIndex, raw);
+      state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
       state.isThinkingBlock = false;
     }
 
     // Close any open text block
-    if (state.textContent !== '') {
+    if (state.textContent !== '' && !state.closedBlockIndices.has(state.contentBlockIndex)) {
       sendContentBlockStop(state.contentBlockIndex, raw);
+      state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
     }
 
-    // Close any open tool calls
+    // Close any open tool calls using stored blockIndex
     for (const [index, toolCall] of state.currentToolCalls) {
-      sendContentBlockStop(index, raw);
+      if (!state.closedBlockIndices.has(toolCall.blockIndex)) {
+        sendContentBlockStop(toolCall.blockIndex, raw);
+        state.closedBlockIndices.add(toolCall.blockIndex);
+      }
     }
   }
 }
@@ -254,8 +257,9 @@ function processToolCallDelta(
   // Check if this is a new tool call
   if (!state.currentToolCalls.has(index)) {
     // Close any previous text block first
-    if (state.textContent !== '' && state.contentBlockIndex === 0) {
+    if (state.textContent !== '' && !state.closedBlockIndices.has(state.contentBlockIndex)) {
       sendContentBlockStop(state.contentBlockIndex, raw);
+      state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
     }
 
@@ -263,22 +267,22 @@ function processToolCallDelta(
     // This ID must match when tool results are sent back
     // If OpenAI doesn't provide an ID, generate a guaranteed unique one
     let toolId: string;
-    if (toolCall.id && !usedToolIds.has(toolCall.id)) {
+    if (toolCall.id && !state.usedToolIds.has(toolCall.id)) {
       toolId = toolCall.id;
-      usedToolIds.add(toolId);
+      state.usedToolIds.add(toolId);
     } else {
-      toolId = generateUniqueToolId();
+      toolId = generateUniqueToolId(state.usedToolIds);
     }
 
     const newToolCall = {
       id: toolId,
       name: toolCall.function?.name || '',
       arguments: '',
+      blockIndex: state.contentBlockIndex + index,
     };
     state.currentToolCalls.set(index, newToolCall);
 
-    // Use content block index based on tool call position
-    const blockIndex = state.contentBlockIndex + index;
+    const blockIndex = newToolCall.blockIndex;
     sendContentBlockStart(blockIndex, 'tool_use', newToolCall.name, raw, newToolCall.id);
   }
 
@@ -291,7 +295,7 @@ function processToolCallDelta(
 
   if (toolCall.function?.arguments) {
     currentCall.arguments += toolCall.function.arguments;
-    const blockIndex = state.contentBlockIndex + index;
+    const blockIndex = currentCall.blockIndex;
     logger.debug('=== Native Tool Call Delta ===', {
       index,
       toolId: currentCall.id,
