@@ -114,9 +114,16 @@ export async function streamOpenAIToAnthropic(
         chunkLog.choices = chunk.choices.map((c: any) => ({
           index: c.index,
           finish_reason: c.finish_reason,
-          hasContent: !!c.delta?.content,
-          hasReasoning: !!c.delta?.reasoning?.content,
-          hasToolCalls: !!c.delta?.tool_calls?.length,
+          content: c.delta?.content || '',
+          reasoning: c.delta?.reasoning?.content || '',
+          toolCalls: c.delta?.tool_calls?.map((tc: any) => ({
+            id: tc.id,
+            type: tc.type,
+            function: tc.function ? {
+              name: tc.function.name,
+              arguments: tc.function.arguments?.substring(0, 200),
+            } : undefined,
+          })),
         }));
       }
 
