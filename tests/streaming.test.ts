@@ -398,12 +398,17 @@ describe('Streaming Converter', () => {
 
             const events = mockRaw.getEvents();
 
-            // Should have two tool_use content blocks started
             const toolBlockStarts = events.filter(e =>
                 e.data.type === 'content_block_start' &&
                 e.data.content_block?.type === 'tool_use'
             );
-            expect(toolBlockStarts.length).toBeGreaterThanOrEqual(1);
+            const toolBlockStops = events.filter(e =>
+                e.data.type === 'content_block_stop' &&
+                typeof e.data.index === 'number'
+            );
+
+            expect(toolBlockStarts.map(e => e.data.index)).toEqual([0, 1]);
+            expect(toolBlockStops.map(e => e.data.index)).toEqual([0, 1]);
         });
 
         it('should handle stream with text followed by tool call', async () => {
@@ -517,6 +522,77 @@ describe('Streaming Converter', () => {
 
             expect(stopEvents).toHaveLength(1);
             expect(stopEvents[0].data.index).toBe(0);
+        });
+
+        it('should keep tool block indices contiguous when text is followed by multiple tool calls', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: 'I will inspect the repo.' }, finish_reason: null }] },
+                {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: 'call_one',
+                                function: { name: 'Bash', arguments: '' }
+                            }]
+                        },
+                        finish_reason: null
+                    }]
+                },
+                {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                function: { arguments: '{"command":"git remote -v"}' }
+                            }]
+                        },
+                        finish_reason: null
+                    }]
+                },
+                {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 1,
+                                id: 'call_two',
+                                function: { name: 'Bash', arguments: '' }
+                            }]
+                        },
+                        finish_reason: null
+                    }]
+                },
+                {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 1,
+                                function: { arguments: '{"command":"git log --oneline -5"}' }
+                            }]
+                        },
+                        finish_reason: null
+                    }]
+                },
+                { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+            ]);
+
+            await streamOpenAIToAnthropic(stream as any, mockReply, 'claude-4-opus');
+
+            const events = mockRaw.getEvents();
+            const toolStarts = events.filter(e =>
+                e.data.type === 'content_block_start' &&
+                e.data.content_block?.type === 'tool_use'
+            );
+            const toolStops = events.filter(e =>
+                e.data.type === 'content_block_stop' &&
+                e.data.index !== 0
+            );
+
+            expect(toolStarts.map(e => e.data.index)).toEqual([1, 2]);
+            expect(toolStops.map(e => e.data.index)).toEqual([1, 2]);
         });
     });
 

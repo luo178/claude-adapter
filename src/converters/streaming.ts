@@ -245,6 +245,8 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
       sendContentBlockStop(state.contentBlockIndex, raw);
       state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
+      state.textContent = '';
+      state.hasTextContentStarted = false;
     }
 
     // Close any open tool calls using stored blockIndex
@@ -273,6 +275,8 @@ function processToolCallDelta(
       sendContentBlockStop(state.contentBlockIndex, raw);
       state.closedBlockIndices.add(state.contentBlockIndex);
       state.contentBlockIndex++;
+      state.textContent = '';
+      state.hasTextContentStarted = false;
     }
 
     // IMPORTANT: Use the original OpenAI tool ID to maintain consistency
