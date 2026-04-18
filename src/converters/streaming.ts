@@ -48,6 +48,7 @@ interface StreamingState {
   thinkingSignature: string;
   isThinkingBlock: boolean;
   hasTextContentStarted: boolean;
+  hasFinished: boolean;
   usedToolIds: Set<string>;
 }
 
@@ -78,6 +79,7 @@ export async function streamOpenAIToAnthropic(
     thinkingSignature: '',
     isThinkingBlock: false,
     hasTextContentStarted: false,
+    hasFinished: false,
     usedToolIds: new Set<string>(),
   };
 
@@ -153,6 +155,14 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
 
   const choice = chunk.choices[0];
   if (!choice) return;
+
+  if (state.hasFinished) {
+    logger.debug('Ignoring chunk after stream finish', {
+      finish_reason: choice.finish_reason,
+      model: chunk.model,
+    });
+    return;
+  }
 
   // Send message_start on first chunk
   if (!state.hasStarted) {
@@ -244,6 +254,8 @@ function processChunk(chunk: OpenAIStreamChunk, state: StreamingState, raw: any)
         state.closedBlockIndices.add(toolCall.blockIndex);
       }
     }
+
+    state.hasFinished = true;
   }
 }
 
@@ -511,15 +523,15 @@ interface ResponsesStreamingState {
   model: string;
   responseModel: string;
   provider: string;
-  contentBlockIndex: number;
-  textContent: string;
-  thinkingContent: string;
-  thinkingSignature: string;
-  isThinkingBlock: boolean;
-  hasTextContentStarted: boolean;
-  currentToolCallId: string;
-  currentToolCallName: string;
+  nextContentBlockIndex: number;
+  activeBlock: {
+    index: number;
+    type: 'text' | 'thinking' | 'tool_use';
+    toolCallId?: string;
+    toolCallName?: string;
+  } | null;
   currentToolCallArgs: string;
+  hasMessageDelta: boolean;
 }
 
 export async function streamResponsesToAnthropic(
@@ -533,15 +545,10 @@ export async function streamResponsesToAnthropic(
     model: originalModel,
     responseModel: '',
     provider,
-    contentBlockIndex: 0,
-    textContent: '',
-    thinkingContent: '',
-    thinkingSignature: '',
-    isThinkingBlock: false,
-    hasTextContentStarted: false,
-    currentToolCallId: '',
-    currentToolCallName: '',
+    nextContentBlockIndex: 0,
+    activeBlock: null,
     currentToolCallArgs: '',
+    hasMessageDelta: false,
   };
 
   logger.debug('Responses streaming started', { model: originalModel, provider });
@@ -583,7 +590,7 @@ function responsesSendMessageStart(state: ResponsesStreamingState, raw: any): vo
 
 function responsesSendContentBlockStart(
   state: ResponsesStreamingState,
-  blockType: string,
+  blockType: 'text' | 'thinking' | 'tool_use',
   raw: any
 ): void {
   const contentBlock: any =
@@ -592,15 +599,15 @@ function responsesSendContentBlockStart(
       : blockType === 'tool_use'
         ? {
             type: 'tool_use',
-            id: state.currentToolCallId || generateToolUseId(),
-            name: state.currentToolCallName,
+            id: state.activeBlock?.toolCallId || generateToolUseId(),
+            name: state.activeBlock?.toolCallName || '',
             input: {},
           }
         : { type: 'text', text: '' };
 
   const event = {
     type: 'content_block_start',
-    index: state.contentBlockIndex,
+    index: state.activeBlock?.index ?? state.nextContentBlockIndex,
     content_block: contentBlock,
   };
   sendSSE(event, raw);
@@ -639,24 +646,42 @@ function responsesProcessEvent(event: any, state: ResponsesStreamingState, raw: 
       break;
 
     case 'response.completed': {
+      responsesCloseActiveBlock(state, raw);
+      if (state.hasMessageDelta) break;
+
+      const usage = event.response?.usage || {};
       const messageEvent = {
         type: 'message_delta',
         delta: {
           stop_reason: event.stop_reason || 'end_turn',
+          stop_sequence: null,
+        },
+        usage: {
+          output_tokens: usage.output_tokens || usage.completion_tokens || 0,
         },
       };
       sendSSE(messageEvent, raw);
+      state.hasMessageDelta = true;
       break;
     }
 
     case 'response.incomplete': {
+      responsesCloseActiveBlock(state, raw);
+      if (state.hasMessageDelta) break;
+
+      const usage = event.response?.usage || {};
       const incompleteEvent = {
         type: 'message_delta',
         delta: {
           stop_reason: 'max_tokens',
+          stop_sequence: null,
+        },
+        usage: {
+          output_tokens: usage.output_tokens || usage.completion_tokens || 0,
         },
       };
       sendSSE(incompleteEvent, raw);
+      state.hasMessageDelta = true;
       break;
     }
   }
@@ -671,19 +696,18 @@ function responsesHandleOutputItemAdded(
   if (!item) return;
 
   if (item.type === 'message') {
-    state.contentBlockIndex = 0;
-    state.isThinkingBlock = false;
-    state.hasTextContentStarted = false;
-    state.textContent = '';
-  } else if (item.type === 'reasoning') {
-    state.isThinkingBlock = true;
-    state.thinkingContent = '';
-    responsesSendContentBlockStart(state, 'thinking', raw);
-  } else if (item.type === 'function_call') {
-    state.currentToolCallId = item.id || '';
-    state.currentToolCallName = item.name || '';
+    responsesCloseActiveBlock(state, raw);
+    state.nextContentBlockIndex = 0;
+    state.activeBlock = null;
     state.currentToolCallArgs = '';
-    responsesSendContentBlockStart(state, 'tool_use', raw);
+  } else if (item.type === 'reasoning') {
+    responsesStartBlock(state, 'thinking', raw);
+  } else if (item.type === 'function_call') {
+    responsesStartBlock(state, 'tool_use', raw, {
+      toolCallId: item.id || generateToolUseId(),
+      toolCallName: item.name || '',
+    });
+    state.currentToolCallArgs = '';
   }
 }
 
@@ -697,28 +721,25 @@ function responsesHandleContentBlockDelta(
 
   if (delta.type === 'output_text') {
     const text = delta.text || '';
-    state.textContent += text;
-    state.hasTextContentStarted = true;
-
-    if (state.isThinkingBlock) {
-      state.thinkingContent += text;
-      responsesSendThinkingDelta(text, raw);
+    if (state.activeBlock?.type === 'thinking') {
+      responsesSendThinkingDelta(state.activeBlock.index, text, raw);
     } else {
-      responsesSendContentBlockDelta(state.contentBlockIndex, text, raw);
+      const blockIndex = responsesEnsureTextBlock(state, raw);
+      responsesSendContentBlockDelta(blockIndex, text, raw);
     }
   } else if (delta.type === 'reasoning_summary') {
     const summary = delta.summary || '';
-    state.thinkingContent += summary;
-    responsesSendThinkingDelta(summary, raw);
+    if (state.activeBlock?.type !== 'thinking') {
+      responsesStartBlock(state, 'thinking', raw);
+    }
+    responsesSendThinkingDelta(state.activeBlock!.index, summary, raw);
   } else if (delta.type === 'function_call_arguments') {
     const args = delta.arguments || '';
+    if (state.activeBlock?.type !== 'tool_use') {
+      responsesStartBlock(state, 'tool_use', raw);
+    }
     state.currentToolCallArgs += args;
-    sendToolCallDelta(
-      state.currentToolCallId,
-      state.currentToolCallName,
-      state.currentToolCallArgs,
-      raw
-    );
+    sendToolCallDelta(state.activeBlock!.index, state.currentToolCallArgs, raw);
   }
 }
 
@@ -727,24 +748,14 @@ function responsesHandleContentBlockStop(
   state: ResponsesStreamingState,
   raw: any
 ): void {
-  const index = event.index ?? state.contentBlockIndex;
+  const index = event.index ?? state.activeBlock?.index;
 
-  if (state.isThinkingBlock) {
-    sendThinkingStop(raw);
-    state.isThinkingBlock = false;
-  } else if (state.currentToolCallId) {
-    sendToolCallStop(
-      state.currentToolCallId,
-      state.currentToolCallName,
-      state.currentToolCallArgs,
-      raw
-    );
-    state.currentToolCallId = '';
-    state.currentToolCallName = '';
-    state.currentToolCallArgs = '';
+  if (index === undefined) {
+    logger.debug('Ignoring responses content_block.stop without active block');
+    return;
   }
 
-  state.contentBlockIndex++;
+  responsesCloseActiveBlock(state, raw, index);
 }
 
 function handleResponseCompleted(event: any, state: ResponsesStreamingState, raw: any): void {
@@ -777,6 +788,7 @@ function handleResponseIncomplete(event: any, state: ResponsesStreamingState, ra
 }
 
 function responsesFinishStream(state: ResponsesStreamingState, raw: any): void {
+  responsesCloseActiveBlock(state, raw);
   const event = {
     type: 'message_stop',
   };
@@ -797,45 +809,60 @@ function responsesSendError(error: Error, state: ResponsesStreamingState, raw: a
   raw.end();
 }
 
-function sendResponsesContentBlockStart(
+function responsesStartBlock(
   state: ResponsesStreamingState,
-  blockType: string,
-  raw: any
-): void {
-  const event: any = {
-    type: 'content_block_start',
-    index: state.contentBlockIndex,
-    content_block: {
-      type: blockType,
-    },
+  blockType: 'text' | 'thinking' | 'tool_use',
+  raw: any,
+  options?: { toolCallId?: string; toolCallName?: string }
+): number {
+  responsesCloseActiveBlock(state, raw);
+
+  state.activeBlock = {
+    index: state.nextContentBlockIndex,
+    type: blockType,
+    toolCallId: options?.toolCallId,
+    toolCallName: options?.toolCallName,
   };
-
-  if (blockType === 'tool_use') {
-    event.content_block.id = state.currentToolCallId || `toolu_${Date.now().toString(36)}`;
-    event.content_block.name = state.currentToolCallName;
-  } else if (blockType === 'thinking') {
-    event.content_block.thinking = '';
-  }
-
-  sendSSE(event, raw);
+  responsesSendContentBlockStart(state, blockType, raw);
+  return state.activeBlock.index;
 }
 
-function sendResponsesContentBlockDelta(text: string, index: number, raw: any): void {
+function responsesEnsureTextBlock(state: ResponsesStreamingState, raw: any): number {
+  if (state.activeBlock?.type === 'text') {
+    return state.activeBlock.index;
+  }
+
+  return responsesStartBlock(state, 'text', raw);
+}
+
+function responsesCloseActiveBlock(
+  state: ResponsesStreamingState,
+  raw: any,
+  expectedIndex?: number
+): void {
+  if (!state.activeBlock) {
+    return;
+  }
+
+  if (expectedIndex !== undefined && state.activeBlock.index !== expectedIndex) {
+    logger.debug('Ignoring responses block stop for non-active index', {
+      expectedIndex,
+      activeIndex: state.activeBlock.index,
+      activeType: state.activeBlock.type,
+    });
+    return;
+  }
+
+  sendResponsesContentBlockStop(state.activeBlock.index, raw);
+  state.activeBlock = null;
+  state.currentToolCallArgs = '';
+  state.nextContentBlockIndex++;
+}
+
+function responsesSendThinkingDelta(index: number, text: string, raw: any): void {
   const event = {
     type: 'content_block_delta',
     index,
-    delta: {
-      type: 'text_delta',
-      text,
-    },
-  };
-  sendSSE(event, raw);
-}
-
-function responsesSendThinkingDelta(text: string, raw: any): void {
-  const event = {
-    type: 'content_block_delta',
-    index: 0,
     delta: {
       type: 'thinking_delta',
       thinking: text,
@@ -844,35 +871,22 @@ function responsesSendThinkingDelta(text: string, raw: any): void {
   sendSSE(event, raw);
 }
 
-function sendThinkingStop(raw: any): void {
+function sendResponsesContentBlockStop(index: number, raw: any): void {
   const event = {
     type: 'content_block_stop',
-    index: 0,
+    index,
   };
   sendSSE(event, raw);
 }
 
-function sendToolCallDelta(
-  toolCallId: string,
-  toolCallName: string,
-  partialArgs: string,
-  raw: any
-): void {
+function sendToolCallDelta(index: number, partialArgs: string, raw: any): void {
   const event = {
     type: 'content_block_delta',
-    index: 0,
+    index,
     delta: {
       type: 'input_json_delta',
       partial_json: partialArgs,
     },
-  };
-  sendSSE(event, raw);
-}
-
-function sendToolCallStop(toolCallId: string, toolCallName: string, args: string, raw: any): void {
-  const event = {
-    type: 'content_block_stop',
-    index: 0,
   };
   sendSSE(event, raw);
 }
