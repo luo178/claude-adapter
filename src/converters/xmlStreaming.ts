@@ -95,6 +95,10 @@ export async function streamXmlOpenAIToAnthropic(
       }
 
       const text = choice.delta?.content || (choice.delta as any)?.text || '';
+      const reasoning = choice.delta?.reasoning;
+      const reasoningText = typeof reasoning === 'string' 
+        ? reasoning 
+        : (reasoning as any)?.content || '';
 
       logger.debug('=== Xml OpenAI Stream Chunk ===', {
         chunkIndex: chunkCount,
@@ -103,6 +107,7 @@ export async function streamXmlOpenAIToAnthropic(
         finishReason: choice.finish_reason,
         hasToolCode: /<\s*tool_code/i.test(text),
         hasDeltaToolCalls: !!choice.delta?.tool_calls?.length,
+        reasoning: reasoningText?.substring(0, 500),
         toolCalls: choice.delta?.tool_calls?.map((tc: any) => ({
           id: tc.id,
           name: tc.function?.name,

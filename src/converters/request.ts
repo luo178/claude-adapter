@@ -241,6 +241,10 @@ function convertMessage(
 
         // Add tool results as XML blocks
         if (toolResults.length > 0) {
+          logger.debug('Tool results being sent to upstream', {
+            count: toolResults.length,
+            firstResult: toolResults[0]?.content?.substring(0, 200),
+          });
           const xmlResults = toolResults
             .map((t) => `<tool_output>\n${t.content}\n</tool_output>`)
             .join('\n\n');
