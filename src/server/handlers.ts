@@ -15,15 +15,12 @@ import { validateAnthropicRequest, formatValidationErrors } from '../utils/valid
 import { logger, RequestLogger } from '../utils/logger';
 import { recordUsage } from '../utils/tokenUsage';
 import { recordError } from '../utils/errorLog';
-import { buildHeaders, buildDefaultHeaders, getSessionId } from './headers';
+import { buildHeaders, getSessionId } from './headers';
 import { resolveTargetModel } from './modelResolver';
-import { ToolFormatDetector, createToolFormatDetector } from '../converters/toolFormatDetector';
+import { createToolFormatDetector } from '../converters/toolFormatDetector';
 
 // Request ID counter for unique identification
 let requestIdCounter = 0;
-
-// Track previous sessionId for header output optimization
-let previousSessionIdForHeaders = '';
 
 function generateRequestId(): string {
   requestIdCounter++;
@@ -56,14 +53,12 @@ export function createMessagesHandler(config: AdapterConfig) {
 
     reply.header('X-Request-Id', requestId);
 
-    const showHeaders = sessionId !== previousSessionIdForHeaders;
-    previousSessionIdForHeaders = sessionId;
     log.debug('=== Request Info ===', {
       requestId,
       sessionId,
       method: request.method,
       url: request.url,
-      ...(showHeaders && { headers: request.headers }),
+      headers: request.headers,
       remote: request.headers['x-forwarded-for'] || request.headers['remote-address'] || 'unknown',
     });
 

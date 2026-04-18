@@ -1,6 +1,32 @@
 import { AdapterConfig, CustomHeader } from '../types/config';
 import { randomUUID } from 'crypto';
 
+const HEADER_GENERATORS: Record<string, () => string> = {
+  uuid: () => randomUUID(),
+  randomUUID: () => randomUUID(),
+  timestamp: () => Date.now().toString(),
+  unix: () => Date.now().toString(),
+  isoTimestamp: () => new Date().toISOString(),
+};
+
+function resolveHeaderGenerator(generator: string): (() => string) | null {
+  const normalized = generator.trim();
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized in HEADER_GENERATORS) {
+    return HEADER_GENERATORS[normalized];
+  }
+
+  const functionCallMatch = normalized.match(/^([A-Za-z_][A-Za-z0-9_-]*)\(\)$/);
+  if (functionCallMatch) {
+    return HEADER_GENERATORS[functionCallMatch[1]] || null;
+  }
+
+  return null;
+}
+
 export function buildHeaders(
   headers?: CustomHeader[],
   sessionConfig?: { outputHeader?: string; sessionId?: string }
@@ -14,7 +40,13 @@ export function buildHeaders(
         continue;
       }
       if (header.generator) {
-        const generatorFn = new Function(`return ${header.generator}`)();
+        const generatorFn = resolveHeaderGenerator(header.generator);
+        if (!generatorFn) {
+          throw new Error(
+            `Unsupported header generator "${header.generator}" for header "${header.name}". ` +
+              `Supported generators: ${Object.keys(HEADER_GENERATORS).join(', ')}`
+          );
+        }
         result[header.name] = generatorFn();
       } else if (header.value) {
         result[header.name] = header.value;

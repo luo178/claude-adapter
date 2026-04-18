@@ -211,18 +211,13 @@ export class ToolFormatDetector {
   }
 }
 
-let globalDetector: ToolFormatDetector | null = null;
-
 export function createToolFormatDetector(
   baseUrl: string, 
   apiKey: string
 ): ToolFormatDetector {
-  if (!globalDetector) {
-    const openai = new OpenAI({
-      baseURL: baseUrl,
-      apiKey,
-    });
-    globalDetector = new ToolFormatDetector(baseUrl, openai);
-  }
-  return globalDetector;
+  const openai = new OpenAI({
+    baseURL: baseUrl,
+    apiKey,
+  });
+  return new ToolFormatDetector(baseUrl, openai);
 }
