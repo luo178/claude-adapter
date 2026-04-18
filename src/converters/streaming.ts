@@ -758,35 +758,6 @@ function responsesHandleContentBlockStop(
   responsesCloseActiveBlock(state, raw, index);
 }
 
-function handleResponseCompleted(event: any, state: ResponsesStreamingState, raw: any): void {
-  const usage = event.response?.usage || {};
-  const messageEvent = {
-    type: 'message_delta',
-    delta: {
-      stop_reason: 'end_turn',
-      stop_sequence: null,
-    },
-    usage: {
-      output_tokens: usage.completion_tokens || 0,
-    },
-  };
-  sendSSE(messageEvent, raw);
-}
-
-function handleResponseIncomplete(event: any, state: ResponsesStreamingState, raw: any): void {
-  const messageEvent = {
-    type: 'message_delta',
-    delta: {
-      stop_reason: 'max_tokens',
-      stop_sequence: null,
-    },
-    usage: {
-      output_tokens: 0,
-    },
-  };
-  sendSSE(messageEvent, raw);
-}
-
 function responsesFinishStream(state: ResponsesStreamingState, raw: any): void {
   responsesCloseActiveBlock(state, raw);
   const event = {

@@ -54,7 +54,7 @@ async function* createMockStream(chunks: any[]): AsyncGenerator<any> {
 }
 
 // Import after mocks are set up
-import { streamOpenAIToAnthropic } from '../src/converters/streaming';
+import { streamOpenAIToAnthropic, streamResponsesToAnthropic } from '../src/converters/streaming';
 
 describe('Streaming Converter', () => {
     describe('streamOpenAIToAnthropic', () => {
@@ -498,6 +498,84 @@ describe('Streaming Converter', () => {
             expect(recordUsage).toHaveBeenCalledWith(expect.objectContaining({
                 model: 'gpt-4-0613'
             }));
+        });
+
+        it('should ignore duplicate finish chunks without emitting duplicate block stops', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: 'Hello' }, finish_reason: null }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+            ]);
+
+            await streamOpenAIToAnthropic(stream as any, mockReply, 'claude-4-opus');
+
+            const events = mockRaw.getEvents();
+            const stopEvents = events.filter(e => e.data.type === 'content_block_stop');
+
+            expect(stopEvents).toHaveLength(1);
+            expect(stopEvents[0].data.index).toBe(0);
+        });
+    });
+
+    describe('streamResponsesToAnthropic', () => {
+        it('should preserve content block indices across text and tool blocks', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { type: 'response.created', response: { model: 'gpt-4.1' } },
+                { type: 'response.output_item.added', item: { type: 'message' } },
+                { type: 'response.content_block.delta', delta: { type: 'output_text', text: 'Need data first.' } },
+                { type: 'response.output_item.added', item: { type: 'function_call', id: 'call_fetch_1', name: 'fetch_data' } },
+                { type: 'response.content_block.delta', delta: { type: 'function_call_arguments', arguments: '{"id":1}' } },
+                { type: 'response.content_block.stop', index: 1 },
+                { type: 'response.completed', response: { usage: { output_tokens: 12 } }, stop_reason: 'tool_use' },
+            ]);
+
+            await streamResponsesToAnthropic(stream as any, mockReply, 'claude-4-opus');
+
+            const events = mockRaw.getEvents();
+            const starts = events.filter(e => e.data.type === 'content_block_start');
+            const deltas = events.filter(e => e.data.type === 'content_block_delta');
+            const stops = events.filter(e => e.data.type === 'content_block_stop');
+
+            expect(starts.map(e => [e.data.index, e.data.content_block.type])).toEqual([
+                [0, 'text'],
+                [1, 'tool_use'],
+            ]);
+            expect(deltas.map(e => [e.data.index, e.data.delta.type])).toEqual([
+                [0, 'text_delta'],
+                [1, 'input_json_delta'],
+            ]);
+            expect(stops.map(e => e.data.index)).toEqual([0, 1]);
+        });
+
+        it('should keep thinking deltas on the active thinking block index', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { type: 'response.created', response: { model: 'gpt-4.1' } },
+                { type: 'response.output_item.added', item: { type: 'message' } },
+                { type: 'response.output_item.added', item: { type: 'reasoning' } },
+                { type: 'response.content_block.delta', delta: { type: 'reasoning_summary', summary: 'Analyzing options' } },
+                { type: 'response.content_block.stop', index: 0 },
+                { type: 'response.completed', response: { usage: { output_tokens: 4 } } },
+            ]);
+
+            await streamResponsesToAnthropic(stream as any, mockReply, 'claude-4-opus');
+
+            const events = mockRaw.getEvents();
+            const thinkingStart = events.find(e => e.data.type === 'content_block_start');
+            const thinkingDelta = events.find(e => e.data.delta?.type === 'thinking_delta');
+            const thinkingStop = events.find(e => e.data.type === 'content_block_stop');
+
+            expect(thinkingStart?.data.index).toBe(0);
+            expect(thinkingDelta?.data.index).toBe(0);
+            expect(thinkingStop?.data.index).toBe(0);
         });
     });
 });

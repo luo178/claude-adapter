@@ -181,6 +181,72 @@ describe('XML Streaming Converter', () => {
             expect(jsonDeltas.length).toBeGreaterThan(0);
         });
 
+        it('should keep a split XML tool call inside a single tool_use block', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: '<tool_code name="test">' }, finish_reason: null }] },
+                { choices: [{ delta: { content: '{"a":' }, finish_reason: null }] },
+                { choices: [{ delta: { content: '1}</tool_code>' }, finish_reason: null }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+            ]);
+
+            await streamXmlOpenAIToAnthropic(stream as any, mockReply, 'test-model');
+
+            const events = mockRaw.getEvents();
+            const toolStarts = events.filter(e =>
+                e.data.type === 'content_block_start' &&
+                e.data.content_block?.type === 'tool_use'
+            );
+            const textDeltas = events.filter(e => e.data.delta?.type === 'text_delta');
+            const toolStops = events.filter(e =>
+                e.data.type === 'content_block_stop' && e.data.index === 0
+            );
+
+            expect(toolStarts).toHaveLength(1);
+            expect(textDeltas).toHaveLength(0);
+            expect(toolStops).toHaveLength(1);
+        });
+
+        it('should close an unfinished XML tool block when the stream ends', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: '<tool_code name="write_file">{"path":"a.txt"' }, finish_reason: null }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+            ]);
+
+            await streamXmlOpenAIToAnthropic(stream as any, mockReply, 'test-model');
+
+            const events = mockRaw.getEvents();
+            const toolStop = events.find(e =>
+                e.data.type === 'content_block_stop' && e.data.index === 0
+            );
+            const messageStop = events[events.length - 1];
+
+            expect(toolStop).toBeDefined();
+            expect(messageStop.data.type).toBe('message_stop');
+        });
+
+        it('should ignore duplicate finish chunks without duplicating message termination', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: 'Hello' }, finish_reason: null }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+                { choices: [{ delta: {}, finish_reason: 'stop' }] },
+            ]);
+
+            await streamXmlOpenAIToAnthropic(stream as any, mockReply, 'test-model');
+
+            const events = mockRaw.getEvents();
+            expect(events.filter(e => e.data.type === 'message_delta')).toHaveLength(1);
+            expect(events.filter(e => e.data.type === 'message_stop')).toHaveLength(1);
+        });
+
         it('should send message_stop at end', async () => {
             const mockRaw = new MockRawResponse();
             const mockReply = { raw: mockRaw } as any;
