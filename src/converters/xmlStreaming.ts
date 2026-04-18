@@ -23,6 +23,7 @@ interface BufferedState {
   toolCallsEmitted: number;
   currentToolId?: string;
   currentToolName?: string;
+  hasFinished: boolean;
 }
 
 const THINK_BLOCK_PATTERN = /<think>[\s\S]*?<\/think>/g;
@@ -51,6 +52,7 @@ export async function streamXmlOpenAIToAnthropic(
     hasStarted: false,
     buffer: '',
     toolCallsEmitted: 0,
+    hasFinished: false,
   };
 
   const raw = reply.raw;
@@ -156,6 +158,14 @@ function processChunk(chunk: OpenAIStreamChunk, state: BufferedState, raw: any):
     return;
   }
 
+  if (state.hasFinished) {
+    logger.debug('Ignoring XML chunk after stream finish', {
+      finishReason: choice.finish_reason,
+      model: chunk.model,
+    });
+    return;
+  }
+
   // Send message_start on first chunk
   if (!state.hasStarted) {
     logger.debug('Sending message_start');
@@ -189,6 +199,31 @@ function processBuffer(state: BufferedState, raw: any): void {
 
     const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '');
 
+    if (state.currentToolId) {
+      const closeIndex = cleanBuffer.search(/<\/\s*tool_code\s*>/i);
+      if (closeIndex === -1) {
+        const partialArgs = cleanToolArgs(cleanBuffer);
+        if (partialArgs) {
+          emitToolUseDelta(partialArgs, state, raw);
+        }
+        state.buffer = '';
+        break;
+      }
+
+      const rawArgs = cleanBuffer.substring(0, closeIndex);
+      const cleanArgs = cleanToolArgs(rawArgs);
+      if (cleanArgs) {
+        emitToolUseDelta(cleanArgs, state, raw);
+      }
+
+      emitToolUseStop(state, raw);
+
+      const closeMatch = cleanBuffer.substring(closeIndex).match(/<\/\s*tool_code\s*>/i);
+      const closeLen = closeMatch ? closeMatch[0].length : '</tool_code>'.length;
+      state.buffer = cleanBuffer.substring(closeIndex + closeLen);
+      continue;
+    }
+
     const openIndex = cleanBuffer.search(/<\s*tool_code\s/i);
     if (openIndex === -1) {
       if (cleanBuffer.trim()) {
@@ -221,7 +256,7 @@ function processBuffer(state: BufferedState, raw: any): void {
         const tagEndIndex = tagEndMatch !== -1 ? openIndex + tagEndMatch : -1;
         const argsAfterTag = tagEndIndex !== -1 ? cleanBuffer.substring(tagEndIndex + 1) : '';
         if (argsAfterTag.trim()) {
-          emitToolUseDelta(argsAfterTag.trim(), state, raw);
+          emitToolUseDelta(cleanToolArgs(argsAfterTag), state, raw);
         }
 
         state.buffer = '';
@@ -267,6 +302,16 @@ function processBuffer(state: BufferedState, raw: any): void {
 }
 
 function flushRemainingContent(state: BufferedState, raw: any): void {
+  if (state.currentToolId) {
+    const cleanArgs = cleanToolArgs(state.buffer.replace(THINK_BLOCK_PATTERN, ''));
+    if (cleanArgs) {
+      emitToolUseDelta(cleanArgs, state, raw);
+    }
+    state.buffer = '';
+    emitToolUseStop(state, raw);
+    return;
+  }
+
   // Clean remaining buffer
   const cleanBuffer = state.buffer.replace(THINK_BLOCK_PATTERN, '').trim();
 
@@ -459,6 +504,10 @@ function sendMessageStart(state: BufferedState, raw: any): void {
 }
 
 function finishStream(state: BufferedState, raw: any): void {
+  if (state.hasFinished) {
+    return;
+  }
+
   logger.debug('Finishing stream', {
     stopReason: state.toolCallsEmitted > 0 ? 'tool_use' : 'end_turn',
     outputTokens: state.outputTokens,
@@ -496,6 +545,7 @@ function finishStream(state: BufferedState, raw: any): void {
   // Send message_stop
   sendSSE({ type: 'message_stop' }, raw);
 
+  state.hasFinished = true;
   raw.end();
 }
 
