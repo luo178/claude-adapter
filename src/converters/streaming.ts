@@ -47,12 +47,14 @@ interface StreamingState {
         id: string;
         name: string;
         arguments: string;
+        blockIndex: number;
     }>;
     inputTokens: number;
     outputTokens: number;
     cachedInputTokens: number;
     hasStarted: boolean;
     textContent: string;
+    textBlockOpen: boolean;
 }
 
 /**
@@ -76,6 +78,7 @@ export async function streamOpenAIToAnthropic(
         cachedInputTokens: 0,
         hasStarted: false,
         textContent: '',
+        textBlockOpen: false,
     };
 
     // Access the underlying Node.js response for SSE streaming
@@ -129,9 +132,9 @@ function processChunk(
 
     // Handle text content
     if (delta.content) {
-        // If this is the first text content, start a text block
-        if (state.textContent === '' && state.contentBlockIndex === 0) {
+        if (!state.textBlockOpen) {
             sendContentBlockStart(state.contentBlockIndex, 'text', '', raw);
+            state.textBlockOpen = true;
         }
 
         state.textContent += delta.content;
@@ -147,15 +150,15 @@ function processChunk(
 
     // Handle finish reason
     if (choice.finish_reason) {
-        // Close any open text block
-        if (state.textContent !== '') {
+        if (state.textBlockOpen) {
             sendContentBlockStop(state.contentBlockIndex, raw);
+            state.textBlockOpen = false;
+            state.textContent = '';
             state.contentBlockIndex++;
         }
 
-        // Close any open tool calls
-        for (const [index, toolCall] of state.currentToolCalls) {
-            sendContentBlockStop(index, raw);
+        for (const toolCall of state.currentToolCalls.values()) {
+            sendContentBlockStop(toolCall.blockIndex, raw);
         }
     }
 }
@@ -169,9 +172,10 @@ function processToolCallDelta(
 
     // Check if this is a new tool call
     if (!state.currentToolCalls.has(index)) {
-        // Close any previous text block first
-        if (state.textContent !== '' && state.contentBlockIndex === 0) {
+        if (state.textBlockOpen) {
             sendContentBlockStop(state.contentBlockIndex, raw);
+            state.textBlockOpen = false;
+            state.textContent = '';
             state.contentBlockIndex++;
         }
 
@@ -186,15 +190,15 @@ function processToolCallDelta(
             toolId = generateUniqueToolId();
         }
 
+        const blockIndex = state.contentBlockIndex + index;
         const newToolCall = {
             id: toolId,
             name: toolCall.function?.name || '',
             arguments: '',
+            blockIndex,
         };
         state.currentToolCalls.set(index, newToolCall);
 
-        // Use content block index based on tool call position
-        const blockIndex = state.contentBlockIndex + index;
         sendContentBlockStart(blockIndex, 'tool_use', newToolCall.name, raw, newToolCall.id);
     }
 
@@ -207,8 +211,7 @@ function processToolCallDelta(
 
     if (toolCall.function?.arguments) {
         currentCall.arguments += toolCall.function.arguments;
-        const blockIndex = state.contentBlockIndex + index;
-        sendInputJsonDelta(blockIndex, toolCall.function.arguments, raw);
+        sendInputJsonDelta(currentCall.blockIndex, toolCall.function.arguments, raw);
     }
 }
 

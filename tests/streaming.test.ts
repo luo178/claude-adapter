@@ -440,9 +440,41 @@ describe('Streaming Converter', () => {
                 e.data.type === 'content_block_start' &&
                 e.data.content_block?.type === 'tool_use'
             );
+            const blockStops = events.filter(e => e.data.type === 'content_block_stop');
 
             expect(textBlock).toBeDefined();
             expect(toolBlock).toBeDefined();
+            expect(blockStops.map(e => e.data.index)).toEqual([0, 1]);
+        });
+
+        it('should not emit duplicate text block stop when text is followed by a tool call', async () => {
+            const mockRaw = new MockRawResponse();
+            const mockReply = { raw: mockRaw } as any;
+
+            const stream = createMockStream([
+                { choices: [{ delta: { content: 'I will inspect the directory first.' }, finish_reason: null }] },
+                {
+                    choices: [{
+                        delta: {
+                            tool_calls: [{
+                                index: 0,
+                                id: 'call_bash',
+                                function: { name: 'Bash', arguments: '{"command":"pwd"}' }
+                            }]
+                        },
+                        finish_reason: null
+                    }]
+                },
+                { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+            ]);
+
+            await streamOpenAIToAnthropic(stream as any, mockReply, 'claude-4-opus');
+
+            const events = mockRaw.getEvents();
+            const blockStops = events.filter(e => e.data.type === 'content_block_stop');
+
+            expect(blockStops).toHaveLength(2);
+            expect(blockStops.map(e => e.data.index)).toEqual([0, 1]);
         });
         it('should generate tool ID if missing in stream', async () => {
             const mockRaw = new MockRawResponse();
