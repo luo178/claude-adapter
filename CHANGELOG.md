@@ -6,6 +6,15 @@ The format follows **Keep a Changelog** and this project adheres to **Semantic V
 
 ---
 
+## [2.1.1] — 2026-04-20
+
+### Fixed
+
+- **Streaming**: Fixed duplicate text block stops in native streaming mode when streamed text is followed by a native tool call. This prevents duplicate assistant preamble rendering in Claude Code.
+- **Streaming**: Fixed tool block index handling to ensure tool blocks close with the same index they started with.
+
+---
+
 ## [2.1.0] — 2026-01-19
 
 ### Added
